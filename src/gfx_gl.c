@@ -34,11 +34,7 @@ int gfx_init(void) {
     return 1;
 }
 
-void gfx_shutdown(void) {
-#ifdef __vita__
-    vglEnd();
-#endif
-}
+void gfx_shutdown(void) {}
 
 int gfx_texture(int w, int h, const uint8_t *rgba, int linear, int repeat) {
     GLuint t;
