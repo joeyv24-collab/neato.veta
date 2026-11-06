@@ -1,0 +1,43 @@
+name: Build VPK
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  vita:
+    runs-on: ubuntu-latest
+    container: vitasdk/vitasdk:latest
+    steps:
+      - name: Tools
+        run: |
+          if command -v apk >/dev/null; then apk add --no-cache git make cmake bash python3 || true; fi
+          if command -v apt-get >/dev/null; then apt-get update && apt-get install -y git make cmake python3 || true; fi
+
+      - uses: actions/checkout@v4
+
+      - name: Build vitaGL and its dependencies
+        shell: bash
+        run: |
+          set -e
+          mkdir -p /tmp/deps && cd /tmp/deps
+          git clone --depth 1 https://github.com/bythos14/SceShaccCgExt
+          (cd SceShaccCgExt && mkdir -p build && cd build && cmake .. && make -j"$(nproc)" install)
+          git clone --depth 1 https://github.com/Rinnegatamante/math-neon
+          (cd math-neon && make -j"$(nproc)" install)
+          git clone --depth 1 https://github.com/Rinnegatamante/vitaShaRK
+          (cd vitaShaRK && make -j"$(nproc)" install)
+          git clone --depth 1 https://github.com/Rinnegatamante/vitaGL
+          (cd vitaGL && make -j"$(nproc)" install)
+
+      - name: Build game
+        shell: bash
+        run: |
+          mkdir -p build && cd build
+          cmake .. && make -j"$(nproc)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neato-vpk
+          path: build/neato.vpk

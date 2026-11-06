@@ -1,0 +1,16 @@
+# Desktop test build (no Vita needed): runs a scripted play-through with a
+# software renderer and writes screenshots to /tmp.
+#   make -f Makefile.test && ./neato_test
+CC ?= gcc
+CFLAGS = -O2 -std=gnu99 -Wall -Wno-misleading-indentation
+SRC = tests/main_test.c src/game.c src/world.c src/model.c src/anim.c src/gfx_soft.c src/platform_test.c
+
+neato_test: $(SRC) src/*.h
+	$(CC) $(CFLAGS) -o $@ $(SRC) -lm
+
+assets:
+	python3 tools/fbx2nmdl.py assets_src/neato.fbx assets/neato.nmdl --height 1.75
+	for f in assets_src/*.png; do python3 tools/fbx2nmdl.py --tex $$f assets/$$(basename $$f .png).ntex; done
+	python3 tools/make_font.py assets/font.ntex && rm -f assets/font_preview.png
+
+.PHONY: assets
