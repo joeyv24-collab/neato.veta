@@ -47,6 +47,7 @@ target_link_libraries(neato
   SceSysmodule_stub
   SceAudio_stub
   SceLibKernel_stub
+  stdc++
   m
 )
 
