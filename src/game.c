@@ -8,6 +8,7 @@
 #include "model.h"
 #include "anim.h"
 #include "world.h"
+#include "enemy.h"
 
 /* ------------------------------------------------------------------ */
 /* tuning                                                              */
@@ -44,6 +45,8 @@ typedef struct {
     float body_pitch, pivot;
     float blink_t, blink;
     float respawn_fade;
+    int target, hit_done, chain, best_chain, takedowns;
+    float chain_t, invuln, hurt_t, scan;
     Animator anim;
     Pose pose;
 } Player;
@@ -69,6 +72,12 @@ static float game_time, hint_t;
 static float fps_acc; static int fps_frames, fps_show;
 static unsigned fx_rng = 777;
 int game_show_hud = 1, game_show_player = 1;   /* toggled by the test harness */
+static Enemies foes;
+typedef enum { GS_INTRO, GS_PLAY, GS_PAUSE } GState;
+static GState gstate = GS_INTRO;
+static float banner_t; static char banner[64];
+static float dead_t;
+int game_skip_intro = 0;
 
 /* ------------------------------------------------------------------ */
 /* asset helpers                                                       */
@@ -204,9 +213,10 @@ static void hud_text(float x, float y, float scale, uint32_t c, const char *s) {
     for (; *s; s++) {
         int k = (unsigned char)*s - 32;
         if (k < 0 || k >= 96) k = 0;
-        float u = (k % 16) / 16.0f, v = (k / 16) / 6.0f;
-        hud_quad(x + 1, y + 1, 16 * scale, ch, u, v, u + 1 / 16.0f, v + 1 / 6.0f, rgba32(0, 0, 0, (c >> 24) & 255));
-        hud_quad(x, y, 16 * scale, ch, u, v, u + 1 / 16.0f, v + 1 / 6.0f, c);
+        const float eu = 0.5f / 256.0f, ev = 0.5f / 96.0f;     /* half-texel inset */
+        float u = (k % 16) / 16.0f + eu, v = (k / 16) / 6.0f + ev, u1 = u + 1 / 16.0f - 2 * eu, v1 = v + 1 / 6.0f - 2 * ev;
+        hud_quad(x + 1, y + 1, 16 * scale, ch, u, v, u1, v1, rgba32(0, 0, 0, (c >> 24) & 255));
+        hud_quad(x, y, 16 * scale, ch, u, v, u1, v1, c);
         x += font_w[k] ? (font_w[k] + 1.5f) * scale : cw;
     }
 }
@@ -220,6 +230,7 @@ static void hud_bar(float x, float y, float w, float h, float f, uint32_t col) {
 /* player                                                              */
 
 static void set_state(PState s) { pl.st = s; pl.st_t = 0; }
+static void slam_damage(float power);
 
 static void player_spawn(vec3 p) {
     memset(&pl.vel, 0, sizeof pl.vel);
@@ -275,6 +286,7 @@ static void land(void) {
     if (pl.st == PS_SLAM) {
         float power = 1.0f + pl.charge / 50.0f;
         fx_shockwave(pl.pos, power);
+        slam_damage(power);
         cam.shake = 0.6f;
         pl.charge = clampf(pl.charge - 30, 0, 100);
         pl.vel.x = pl.vel.z = 0;
@@ -291,6 +303,178 @@ static void land(void) {
         set_state(PS_LAND);
         anim_play(&pl.anim, ANIM_LAND, 0.05f);
     } else set_state(PS_GROUND);
+}
+
+
+/* ------------------------------------------------------------------ */
+/* combat                                                              */
+
+static void chain_add(int n) {
+    pl.chain += n; pl.chain_t = 0;
+    if (pl.chain > pl.best_chain) pl.best_chain = pl.chain;
+    pl.charge = clampf(pl.charge + 2.0f + pl.chain * 0.4f, 0, 100);
+}
+
+static void show_banner(const char *t) {
+    snprintf(banner, sizeof banner, "%s", t);
+    banner_t = 3.0f;
+}
+
+static void check_cleared(int before) {
+    int now = enemies_groups_cleared(&foes);
+    if (now > before) {
+        if (now >= foes.ngroups) show_banner("ZONE 3 LIBERATED");
+        else show_banner("CHECKPOINT BROKEN");
+    }
+}
+
+static void face_point(vec3 p) {
+    vec3 d = v3sub(p, pl.pos);
+    if (d.x * d.x + d.z * d.z > 1e-4f) pl.yaw = atan2f(d.x, d.z);
+}
+
+static void counter_or_blast(void);
+
+/* square: zip to the best guard in the stick direction and hit them.
+ * Unaware guards approached from behind or from above get a silent takedown. */
+static void start_strike(vec3 dir, float mag) {
+    int t = enemies_target(&foes, pl.pos, mag > 0 ? dir : v3(0, 0, 0), pl.grounded ? 9.0f : 6.0f);
+    pl.target = t; pl.hit_done = 0;
+    if (t >= 0) {
+        Enemy *e = &foes.e[t];
+        face_point(e->pos);
+        if (!enemy_aware(&foes, t)) {
+            vec3 ef = v3(sinf(e->yaw), 0, cosf(e->yaw));
+            vec3 to_me = v3norm(v3sub(pl.pos, e->pos));
+            int behind = v3dot(ef, to_me) < -0.2f;
+            int above = pl.pos.y > e->pos.y + 1.5f;
+            float d = v3len(v3sub(e->pos, pl.pos));
+            if ((behind && d < 3.5f) || (above && d < 6.0f)) {
+                int before = enemies_groups_cleared(&foes);
+                enemy_takedown(&foes, t);
+                pl.takedowns++;
+                pl.pos = v3add(e->pos, v3scale(v3norm(v3sub(pl.pos, e->pos)), 0.9f));
+                pl.pos.y = e->pos.y;
+                pl.grounded = 1; pl.vel = v3(0, 0, 0);
+                set_state(PS_ATTACK); pl.combo = 3; pl.hit_done = 1;
+                anim_play(&pl.anim, ANIM_KICK, 0.05f);
+                fx_burst(v3add(e->pos, v3(0, 1.2f, 0)), 10, 3, rgba32(160, 200, 255, 255));
+                show_banner("SILENT TAKEDOWN");
+                check_cleared(before);
+                return;
+            }
+        }
+    } else if (mag > 0) face_towards(dir, 100, 1);
+    set_state(PS_ATTACK);
+    static const AnimId seq[4] = {ANIM_PUNCH_L, ANIM_PUNCH_R, ANIM_KICK, ANIM_PUNCH_L};
+    anim_play(&pl.anim, seq[pl.combo & 3], 0.05f);
+}
+
+static void attack_update(const Input *in, vec3 dir, float mag, float dt) {
+    (void)dt;
+    vec3 f = facing();
+    if (pl.target >= 0 && !pl.hit_done) {
+        /* close the gap fast, like a kinetic dash */
+        Enemy *e = &foes.e[pl.target];
+        vec3 d = v3sub(e->pos, pl.pos); d.y = 0;
+        float dist = v3len(d);
+        face_point(e->pos);
+        float want = dist > 1.1f ? fminf((dist - 1.0f) / fmaxf(0.14f - pl.st_t, 0.03f), 38.0f) : 0;
+        pl.vel.x = f.x * want; pl.vel.z = f.z * want;
+        if (want > 12 && ((int)(game_time * 60)) % 2 == 0)
+            fx_spawn(v3add(pl.pos, v3(0, 1.0f, 0)), v3(0, 0, 0), 0.25f, 0.18f, rgba32(140, 230, 255, 200), 1, 0);
+        if (pl.st_t >= 0.12f) {
+            pl.hit_done = 1;
+            if (dist < 2.0f && enemy_alive(e)) {
+                int kick = pl.combo == 2;
+                int before = enemies_groups_cleared(&foes);
+                enemy_hit(&foes, pl.target, kick ? 2 : 1, pl.pos, kick ? 9.0f : 3.0f, kick ? 3.5f : 0);
+                chain_add(1);
+                cam.shake = fmaxf(cam.shake, kick ? 0.22f : 0.1f);
+                fx_burst(v3add(e->pos, v3(0, 1.3f, 0)), kick ? 14 : 8, kick ? 7 : 4, rgba32(140, 230, 255, 255));
+                check_cleared(before);
+            }
+        }
+    } else {
+        vec3 lunge = v3scale(f, pl.st_t < 0.12f ? 5.0f : 0.0f);
+        pl.vel.x = lunge.x; pl.vel.z = lunge.z;
+    }
+    if ((in->pressed & BTN_SQUARE) && pl.st_t > 0.08f) pl.queued = 1;
+    if ((in->pressed & BTN_TRIANGLE) && enemies_counterable(&foes, pl.pos, 5.0f) >= 0) { counter_or_blast(); return; }
+    if ((in->pressed & BTN_CIRCLE) && pl.st_t > 0.1f) {        /* cancel into a dodge */
+        vec3 d = mag > 0 ? dir : v3scale(f, -1);
+        face_towards(d, 100, 1);
+        set_state(PS_DODGE); anim_play(&pl.anim, ANIM_DODGE, 0.05f);
+        return;
+    }
+    float len = pl.target >= 0 ? 0.3f : 0.34f;
+    if (pl.st_t > len) {
+        if (pl.queued) {
+            pl.queued = 0; pl.combo = (pl.combo + 1) % 3;
+            start_strike(dir, mag);
+        } else { pl.combo = 0; set_state(PS_GROUND); }
+    }
+}
+
+/* triangle: counter a guard who is winding up, otherwise a kinetic blast */
+static void counter_or_blast(void) {
+    int c = enemies_counterable(&foes, pl.pos, 5.0f);
+    vec3 o;
+    if (c >= 0) {
+        Enemy *e = &foes.e[c];
+        face_point(e->pos);
+        vec3 d = v3sub(pl.pos, e->pos); d.y = 0;
+        if (v3len(d) > 1.3f) pl.pos = v3add(e->pos, v3scale(v3norm(d), 1.2f));
+        int before = enemies_groups_cleared(&foes);
+        enemy_hit(&foes, c, 2, pl.pos, 10.0f, 4.0f);
+        chain_add(2);
+        pl.invuln = 0.5f;
+        set_state(PS_ATTACK); pl.target = -1; pl.hit_done = 1; pl.combo = 0;
+        anim_play(&pl.anim, ANIM_COUNTER, 0.04f);
+        fx_burst(v3add(e->pos, v3(0, 1.4f, 0)), 16, 6, rgba32(255, 255, 255, 255));
+        cam.shake = 0.25f;
+        check_cleared(before);
+        return;
+    }
+    if (pl.charge < 15) return;
+    pl.charge -= 15;
+    set_state(PS_ATTACK); pl.combo = 0; pl.target = -1; pl.hit_done = 1;
+    anim_play(&pl.anim, ANIM_BLAST, 0.05f);
+    o = v3add(pl.pos, v3add(v3scale(facing(), 0.6f), v3(0, 1.3f, 0)));
+    for (int i = 0; i < 20; i++)
+        fx_spawn(o, v3add(v3scale(facing(), rng_range(&fx_rng, 14, 24)),
+                          v3(rng_range(&fx_rng, -2, 2), rng_range(&fx_rng, -1, 2), rng_range(&fx_rng, -2, 2))),
+                 0.5f, 0.25f, rgba32(140, 230, 255, 255), 1, 0);
+    cam.shake = 0.15f;
+    int before = enemies_groups_cleared(&foes);
+    vec3 f = facing();
+    for (int i = 0; i < foes.n; i++) {
+        Enemy *e = &foes.e[i];
+        if (!enemy_alive(e)) continue;
+        vec3 d = v3sub(e->pos, pl.pos);
+        if (fabsf(d.y) > 2.5f) continue;
+        d.y = 0;
+        float l = v3len(d);
+        if (l < 11 && l > 0.01f && v3dot(v3scale(d, 1 / l), f) > 0.55f) {
+            enemy_hit(&foes, i, 2, pl.pos, 15.0f, 4.5f);
+            chain_add(1);
+        }
+    }
+    check_cleared(before);
+}
+
+static void slam_damage(float power) {
+    int before = enemies_groups_cleared(&foes);
+    float r = 4.0f + power * 2.5f;
+    for (int i = 0; i < foes.n; i++) {
+        Enemy *e = &foes.e[i];
+        if (!enemy_alive(e)) continue;
+        vec3 d = v3sub(e->pos, pl.pos);
+        if (fabsf(d.y) > 2.0f) continue;
+        d.y = 0;
+        if (v3len(d) < r) { enemy_hit(&foes, i, 3, pl.pos, 12.0f, 6.0f); chain_add(1); }
+    }
+    check_cleared(before);
 }
 
 static void player_update(const Input *in, float dt) {
@@ -310,19 +494,7 @@ static void player_update(const Input *in, float dt) {
         if (pl.st == PS_LAND) { speed = 0; if (pl.st_t > 0.28f) set_state(PS_GROUND); }
         if (pl.st == PS_ATTACK) {
             speed = 0;
-            vec3 lunge = v3scale(facing(), pl.st_t < 0.12f ? 5.0f : 0.0f);
-            pl.vel.x = lunge.x; pl.vel.z = lunge.z;
-            if ((in->pressed & BTN_SQUARE) && pl.st_t > 0.1f) pl.queued = 1;
-            if (pl.st_t > 0.34f) {
-                if (pl.queued && pl.combo < 3) {
-                    pl.queued = 0; pl.combo++;
-                    if (mag > 0) face_towards(dir, 100, 1);
-                    set_state(PS_ATTACK);
-                    anim_play(&pl.anim, pl.combo == 1 ? ANIM_PUNCH_R : pl.combo == 2 ? ANIM_KICK : ANIM_PUNCH_L, 0.06f);
-                    vec3 hand = v3add(pl.pos, v3add(v3scale(facing(), 0.8f), v3(0, 1.2f, 0)));
-                    fx_burst(hand, 6, 4, rgba32(120, 220, 255, 255));
-                } else { pl.combo = 0; set_state(PS_GROUND); }
-            }
+            attack_update(in, dir, mag, dt);
             break;
         }
         vec3 target = v3scale(dir, speed);
@@ -344,21 +516,10 @@ static void player_update(const Input *in, float dt) {
             set_state(PS_DODGE);
             anim_play(&pl.anim, ANIM_DODGE, 0.05f);
         } else if (in->pressed & BTN_SQUARE) {
-            if (mag > 0) face_towards(dir, 100, 1);
             pl.combo = 0; pl.queued = 0;
-            set_state(PS_ATTACK);
-            anim_play(&pl.anim, ANIM_PUNCH_L, 0.06f);
-        } else if ((in->pressed & BTN_TRIANGLE) && pl.charge >= 15) {
-            /* kinetic blast: spend charge for a cone of force */
-            pl.charge -= 15;
-            set_state(PS_ATTACK); pl.combo = 3;
-            anim_play(&pl.anim, ANIM_BLAST, 0.05f);
-            vec3 o = v3add(pl.pos, v3add(v3scale(facing(), 0.6f), v3(0, 1.3f, 0)));
-            for (int i = 0; i < 20; i++)
-                fx_spawn(o, v3add(v3scale(facing(), rng_range(&fx_rng, 14, 24)),
-                                  v3(rng_range(&fx_rng, -2, 2), rng_range(&fx_rng, -1, 2), rng_range(&fx_rng, -2, 2))),
-                         0.5f, 0.25f, rgba32(140, 230, 255, 255), 1, 0);
-            cam.shake = 0.15f;
+            start_strike(dir, mag);
+        } else if (in->pressed & BTN_TRIANGLE) {
+            counter_or_blast();
         }
         /* walked off a ledge */
         float fl = world_floor(&world, pl.pos.x, pl.pos.z, pl.pos.y + 0.05f, P_RADIUS);
@@ -588,15 +749,150 @@ int game_init(void) {
     cam.yaw = pl.yaw; cam.pitch = 0.22f; cam.dist = 4.4f;
     cam.target = v3add(pl.pos, v3(0, 1.45f, 0));
     cam.fwd = v3(0, 0, -1);
+    pl.target = -1;
+    enemies_init(&foes, &world, 913);
+    gstate = game_skip_intro ? GS_PLAY : GS_INTRO;
     return 1;
 }
 
+static void player_defeated(void) {
+    enemies_reset(&foes);
+    player_spawn(world.spawn);
+    pl.health = 100; pl.chain = 0;
+    pl.respawn_fade = 1.0f;
+    show_banner("NEATO WAS DOWNED");
+    dead_t = 0;
+}
+
+static void combat_update(float dt) {
+    PlayerInfo pi;
+    pi.pos = pl.pos;
+    pl.invuln = fmaxf(0, pl.invuln - dt);
+    pi.invulnerable = pl.invuln > 0 || (pl.st == PS_DODGE && pl.st_t < 0.38f) || pl.st == PS_LEDGE ||
+                      pl.st == PS_SLAM || pl.st == PS_WALLRUN;
+    pi.hidden = pl.pos.y > 3.0f;
+    int from;
+    float dmg = enemies_update(&foes, &world, &pi, dt, &from);
+    if (dmg > 0) {
+        pl.health -= dmg;
+        pl.chain = 0;
+        pl.hurt_t = 0.4f;
+        pl.invuln = 0.6f;
+        cam.shake = 0.3f;
+        vec3 away = v3sub(pl.pos, foes.e[from].pos); away.y = 0;
+        away = v3norm(away);
+        pl.vel = v3scale(away, 6);
+        face_point(foes.e[from].pos);
+        set_state(PS_LAND);
+        anim_play(&pl.anim, ANIM_HIT, 0.04f);
+        fx_burst(v3add(pl.pos, v3(0, 1.3f, 0)), 10, 4, rgba32(255, 90, 60, 255));
+        if (pl.health <= 0) player_defeated();
+    }
+    pl.hurt_t = fmaxf(0, pl.hurt_t - dt);
+    /* keep Neato from walking through guards */
+    if (pl.st != PS_DODGE && pl.st != PS_ATTACK) {
+        for (int i = 0; i < foes.n; i++) {
+            Enemy *e = &foes.e[i];
+            if (!enemy_alive(e) || e->st == E_KNOCK) continue;
+            vec3 d = v3sub(pl.pos, e->pos);
+            if (fabsf(d.y) > 1.2f) continue;
+            d.y = 0;
+            float l = v3len(d);
+            if (l < 0.75f && l > 0.001f) pl.pos = v3add(pl.pos, v3scale(d, (0.75f - l) / l));
+        }
+    }
+    pl.chain_t += dt;
+    if (pl.chain_t > 3.0f) pl.chain = 0;
+    banner_t = fmaxf(0, banner_t - dt);
+}
+
 void game_update(const Input *in, float dt) {
+    if (gstate == GS_INTRO) {
+        game_time += dt;
+        if (in->pressed & (BTN_CROSS | BTN_START)) gstate = GS_PLAY;
+        return;
+    }
+    if (gstate == GS_PAUSE) {
+        if (in->pressed & (BTN_START | BTN_CIRCLE)) gstate = GS_PLAY;
+        return;
+    }
+    if (in->pressed & BTN_START) { gstate = GS_PAUSE; return; }
     game_time += dt;
     hint_t += dt;
+    pl.scan = approachf(pl.scan, (in->held & BTN_L) ? 1.0f : 0.0f, dt * 5);
     camera_update(in, dt);
     player_update(in, dt);
+    combat_update(dt);
     fx_update(dt);
+}
+
+/* tall light beams over unbroken checkpoints, visible through the fog */
+static void draw_beacons(const mat4 *proj, const mat4 *view) {
+    GVert v[MAX_GROUPS * 8]; uint16_t idx[MAX_GROUPS * 12]; int nv = 0, ni = 0;
+    vec3 right = v3(view->m[0], 0, view->m[8]);
+    right = v3norm(right);
+    for (int g = 0; g < foes.ngroups; g++) {
+        if (foes.group_left[g] == 0) continue;
+        vec3 p = foes.group_pos[g];
+        float d = v3len(v3sub(p, pl.pos));
+        if (d < 12) continue;
+        float w = 0.6f + d * 0.01f;
+        uint32_t cb = foes.group_alert[g] ? rgba32(255, 80, 60, 150) : rgba32(255, 160, 50, 130);
+        uint32_t ct = cb & 0x00ffffff;
+        vec3 r = v3scale(right, w);
+        vec3 q[4] = {v3sub(p, r), v3add(p, r), v3add(v3add(p, r), v3(0, 140, 0)), v3add(v3sub(p, r), v3(0, 140, 0))};
+        uint32_t cc[4] = {cb, cb, ct, ct};
+        uint16_t s = (uint16_t)nv;
+        for (int k = 0; k < 4; k++) v[nv++] = (GVert){q[k].x, q[k].y, q[k].z, 0.5f, 0.5f, cc[k]};
+        idx[ni++] = s; idx[ni++] = s + 1; idx[ni++] = s + 2; idx[ni++] = s; idx[ni++] = s + 2; idx[ni++] = s + 3;
+    }
+    if (!ni) return;
+    gfx_set_matrices(proj, view);
+    gfx_draw(v, nv, idx, ni, world.tex_white, GFX_ADDITIVE | GFX_NO_ZWRITE | GFX_NO_CULL | GFX_NO_FOG);
+}
+
+static void draw_minimap(void) {
+    const float cx = SCREEN_W - 90, cy = 120, R = 70, scale = R / 70.0f;   /* 70m radius */
+    hud_quad(cx - R - 4, cy - R - 4, 2 * R + 8, 2 * R + 8, 0, 0, 0, 0, rgba32(10, 14, 22, 150));
+    float c = cosf(cam.yaw), s = sinf(cam.yaw);
+    #define MAP(px, pz, ox, oy) do { float dx = (px) - pl.pos.x, dz = (pz) - pl.pos.z; \
+        ox = cx - (dx * c - dz * s) * scale; oy = cy - (dx * s + dz * c) * scale; } while (0)
+    /* building footprints */
+    for (int i = 0; i < world.nbox; i++) {
+        const Box *b = &world.box[i];
+        if (b->kind != BOX_BUILDING || b->mn.y > 0.5f) continue;
+        float mx = (b->mn.x + b->mx.x) * 0.5f, mz = (b->mn.z + b->mx.z) * 0.5f, ox, oy;
+        MAP(mx, mz, ox, oy);
+        if (fabsf(ox - cx) > R - 6 || fabsf(oy - cy) > R - 6) continue;
+        float hw = fmaxf(b->mx.x - b->mn.x, b->mx.z - b->mn.z) * 0.5f * scale;
+        hud_quad(ox - hw * 0.7f, oy - hw * 0.7f, hw * 1.4f, hw * 1.4f, 0, 0, 0, 0, rgba32(90, 100, 115, 140));
+    }
+    for (int i = 0; i < foes.n; i++) {
+        const Enemy *e = &foes.e[i];
+        if (!enemy_alive(e)) continue;
+        float ox, oy; MAP(e->pos.x, e->pos.z, ox, oy);
+        if (fabsf(ox - cx) > R || fabsf(oy - cy) > R) continue;
+        uint32_t col = enemy_aware(&foes, i) ? rgba32(255, 70, 60, 255) : rgba32(255, 170, 60, 255);
+        hud_quad(ox - 2.5f, oy - 2.5f, 5, 5, 0, 0, 0, 0, col);
+    }
+    for (int g = 0; g < foes.ngroups; g++) {        /* checkpoint markers clamp to the edge */
+        if (foes.group_left[g] == 0) continue;
+        float ox, oy; MAP(foes.group_pos[g].x, foes.group_pos[g].z, ox, oy);
+        float dx = ox - cx, dy = oy - cy, l = sqrtf(dx * dx + dy * dy);
+        if (l > R - 6) { ox = cx + dx / l * (R - 6); oy = cy + dy / l * (R - 6); }
+        hud_quad(ox - 4, oy - 4, 8, 8, 0, 0, 0, 0, rgba32(255, 210, 80, 255));
+    }
+    hud_quad(cx - 3, cy - 5, 6, 10, 0, 0, 0, 0, rgba32(110, 225, 255, 255));    /* player */
+    #undef MAP
+}
+
+static void hud_center(float y, float scale, uint32_t c, const char *t) {
+    float w = 0;
+    for (const char *p = t; *p; p++) {
+        int k = (unsigned char)*p - 32;
+        w += (k >= 0 && k < 96 && font_w[k] ? font_w[k] + 1.5f : 9.0f) * scale;
+    }
+    hud_text(SCREEN_W / 2 - w / 2, y, scale, c, t);
 }
 
 static void draw_hero(const mat4 *proj, const mat4 *view) {
@@ -631,6 +927,7 @@ static void draw_hero(const mat4 *proj, const mat4 *view) {
 
 static const char *state_name(void) {
     static const char *n[] = {"", "", "GLIDE", "WALL RUN", "", "SLAM", "", "", ""};
+    if (gstate != GS_PLAY) return "";
     return n[pl.st];
 }
 
@@ -655,31 +952,95 @@ void game_render(void) {
     mat4 view = m4lookat(v3add(cam.pos, shake), v3add(cam.target, shake), v3(0, 1, 0));
     gfx_fog(FOG_RGB[0], FOG_RGB[1], FOG_RGB[2], FOG_START, FOG_END);
     world_draw(&world, &proj, &view, cam.pos, cam.fwd, FOG_END);
+    enemies_draw(&foes, &proj, &view, cam.pos, FOG_END, pl.scan > 0.5f);
+    draw_beacons(&proj, &view);
     if (game_show_player) draw_hero(&proj, &view);
     fx_draw(&proj, &view);
 
     /* HUD */
     if (!game_show_hud) { gfx_end_frame(); return; }
     gfx_set_matrices(&ortho, &ident);
-    hud_bar(24, 24, 220, 10, pl.health / 100.0f, rgba32(230, 70, 90, 255));
-    hud_bar(24, 42, 220, 8, pl.charge / 100.0f, rgba32(110, 225, 255, 255));
+    if (pl.scan > 0) hud_quad(0, 0, SCREEN_W, SCREEN_H, 0, 0, 0, 0, rgba32(20, 60, 110, (int)(70 * pl.scan)));
+    if (pl.hurt_t > 0) hud_quad(0, 0, SCREEN_W, SCREEN_H, 0, 0, 0, 0, rgba32(200, 30, 30, (int)(160 * pl.hurt_t)));
+    if (gstate == GS_INTRO || gstate == GS_PAUSE) hud_quad(0, 0, SCREEN_W, SCREEN_H, 0, 0, 0, 0, rgba32(6, 10, 18, 200));
+    if (gstate != GS_INTRO) {
+        hud_bar(24, 24, 220, 10, pl.health / 100.0f, rgba32(230, 70, 90, 255));
+        hud_bar(24, 42, 220, 8, pl.charge / 100.0f, rgba32(110, 225, 255, 255));
+        draw_minimap();
+    }
     if (pl.respawn_fade > 0) hud_quad(0, 0, SCREEN_W, SCREEN_H, 0, 0, 0, 0, rgba32(200, 230, 255, (int)(pl.respawn_fade * 255)));
     hud_flush(world.tex_white);
+
+    char buf[96];
+    if (gstate == GS_INTRO) {
+        float a = clampf(game_time * 0.8f, 0, 1);
+        uint32_t w = rgba32(255, 255, 255, (int)(255 * a)), cyan = rgba32(140, 230, 255, (int)(255 * a));
+        hud_center(110, 2.6f, w, "NEATO");
+        hud_center(168, 1.1f, cyan, "SALTREACH  -  QUARANTINE ZONE 3");
+        hud_center(225, 1.0f, w, "Six weeks after the flood, Vantage Security sealed the island.");
+        hud_center(250, 1.0f, w, "No one gets out. No one asks why.");
+        hud_center(285, 1.0f, w, "Neato was on the pier the night the reactor barge went up.");
+        hud_center(310, 1.0f, w, "Now every fall, every hit, every impact makes her stronger.");
+        hud_center(350, 1.0f, cyan, "Break the Vantage checkpoints. Find out what they're hiding.");
+        if (((int)(game_time * 2)) % 2) hud_center(430, 1.0f, rgba32(255, 255, 255, 200), "Press X to begin");
+        hud_flush(tex_font);
+        gfx_end_frame();
+        return;
+    }
     hud_text(252, 18, 1, rgba32(255, 255, 255, 230), "NEATO");
     hud_text(252, 36, 0.8f, rgba32(150, 230, 255, 230), "KINETIC");
-    const char *sn = state_name();
-    if (*sn) hud_text(SCREEN_W / 2 - 40, SCREEN_H - 60, 1, rgba32(150, 230, 255, 220), sn);
-    if (hint_t < 12) {
-        uint32_t c = rgba32(255, 255, 255, (int)(230 * clampf(12 - hint_t, 0, 1)));
-        hud_text(24, SCREEN_H - 120, 0.9f, c, "X jump / hold in air: glide");
-        hud_text(24, SCREEN_H - 102, 0.9f, c, "R sprint - into a wall: wall run");
-        hud_text(24, SCREEN_H - 84, 0.9f, c, "O dodge / in air: ground slam");
-        hud_text(24, SCREEN_H - 66, 0.9f, c, "[] strike   /\\ kinetic blast");
+    /* objective */
+    int cleared = enemies_groups_cleared(&foes);
+    if (cleared < foes.ngroups) {
+        snprintf(buf, sizeof buf, "Break the Vantage checkpoints  %d/%d", cleared, foes.ngroups);
+        hud_text(24, 62, 0.85f, rgba32(255, 210, 80, 230), buf);
+        float best = 1e9f;
+        for (int g = 0; g < foes.ngroups; g++)
+            if (foes.group_left[g]) best = fminf(best, v3len(v3sub(foes.group_pos[g], pl.pos)));
+        snprintf(buf, sizeof buf, "nearest  %dm", (int)best);
+        hud_text(24, 80, 0.75f, rgba32(255, 255, 255, 170), buf);
+    } else hud_text(24, 62, 0.85f, rgba32(140, 230, 255, 230), "Zone 3 is free. More of Saltreach coming soon.");
+    if (pl.chain >= 2) {
+        snprintf(buf, sizeof buf, "x%d", pl.chain);
+        hud_text(SCREEN_W - 120, 210, 2.0f, rgba32(140, 230, 255, 240), buf);
+        hud_text(SCREEN_W - 118, 246, 0.8f, rgba32(255, 255, 255, 200), "COMBO");
     }
-    hud_text(24, SCREEN_H - 36, 0.8f, rgba32(255, 255, 255, 140), "SALTREACH - QUARANTINE ZONE 3");
+    if (enemies_counterable(&foes, pl.pos, 5.0f) >= 0 && ((int)(game_time * 12)) % 2)
+        hud_center(SCREEN_H - 150, 1.3f, rgba32(255, 255, 255, 255), "/\\  COUNTER");
+    if (banner_t > 0) {
+        float a = clampf(banner_t, 0, 1);
+        hud_center(150, 1.8f, rgba32(255, 255, 255, (int)(255 * a)), banner);
+    }
+    const char *sn = state_name();
+    if (*sn) hud_center(SCREEN_H - 60, 1, rgba32(150, 230, 255, 220), sn);
+    if (pl.scan > 0.5f && gstate == GS_PLAY) hud_center(SCREEN_H - 84, 0.9f, rgba32(150, 210, 255, 220), "KINETIC SENSE");
+    if (hint_t < 14 && gstate == GS_PLAY) {
+        uint32_t c = rgba32(255, 255, 255, (int)(230 * clampf(14 - hint_t, 0, 1)));
+        hud_text(24, SCREEN_H - 138, 0.85f, c, "X jump / hold in air: glide");
+        hud_text(24, SCREEN_H - 121, 0.85f, c, "R sprint - into a wall: wall run");
+        hud_text(24, SCREEN_H - 104, 0.85f, c, "O dodge / in air: ground slam");
+        hud_text(24, SCREEN_H - 87, 0.85f, c, "[] strike   /\\ counter or kinetic blast");
+        hud_text(24, SCREEN_H - 70, 0.85f, c, "L kinetic sense (see guards through walls)");
+    }
+    if (gstate == GS_PAUSE) {
+        hud_center(120, 2.0f, rgba32(255, 255, 255, 255), "PAUSED");
+        static const char *lines[] = {
+            "Left stick - move        Right stick - camera",
+            "X - jump, hold in the air to glide, X on a wall to kick off",
+            "R - sprint. Sprint into a building to run up it",
+            "[] - strike (chains between guards)   O - dodge / ground slam",
+            "/\\ - counter when a guard flashes, otherwise kinetic blast",
+            "L - kinetic sense     Unaware guard from behind or above: takedown",
+            "",
+            "Start / O - resume       Start + Select - quit",
+        };
+        for (int i = 0; i < 8; i++) hud_center(190 + i * 26, 0.95f, rgba32(220, 230, 240, 230), lines[i]);
+        snprintf(buf, sizeof buf, "Best combo x%d     Takedowns %d", pl.best_chain, pl.takedowns);
+        hud_center(420, 0.9f, rgba32(140, 230, 255, 230), buf);
+    }
     fps_frames++;
-    char buf[32]; snprintf(buf, sizeof buf, "%d FPS", fps_show);
-    hud_text(SCREEN_W - 90, 14, 0.8f, rgba32(255, 255, 255, 150), buf);
+    snprintf(buf, sizeof buf, "%d FPS", fps_show);
+    hud_text(SCREEN_W - 70, SCREEN_H - 24, 0.7f, rgba32(255, 255, 255, 120), buf);
     hud_flush(tex_font);
     gfx_end_frame();
 }
@@ -692,4 +1053,6 @@ void game_fps_tick(float dt) {
 
 void game_debug(GameDebug *d) {
     d->x = pl.pos.x; d->y = pl.pos.y; d->z = pl.pos.z; d->yaw = pl.yaw; d->state = pl.st; d->charge = pl.charge;
+    d->health = pl.health; d->cleared = enemies_groups_cleared(&foes); d->chain = pl.best_chain;
+    d->guards_down = 0; for (int i = 0; i < foes.n; i++) if (!enemy_alive(&foes.e[i])) d->guards_down++;
 }

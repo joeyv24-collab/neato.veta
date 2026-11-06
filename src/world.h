@@ -47,5 +47,9 @@ float world_floor(const World *w, float x, float z, float y, float radius);
 /* segment cast against boxes; returns 1 and fraction t on hit */
 int   world_raycast(const World *w, vec3 a, vec3 b, float *t, vec3 *normal);
 int   world_on_land(float x, float z);
+/* push a vertical cylinder out of boxes taller than y0 (returns 1 on contact) */
+int   world_push_circle(const World *w, vec3 *p, float r, float y0, float y1);
+/* adds barricades and a floodlight mast around each checkpoint */
+void  world_add_checkpoints(World *w, const vec3 *pos, int n);
 
 #endif

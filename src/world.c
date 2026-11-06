@@ -356,3 +356,55 @@ int world_raycast(const World *w, vec3 a, vec3 b, float *tout, vec3 *nout) {
     if (best <= 1) { if (tout) *tout = best; if (nout) *nout = bn; return 1; }
     return 0;
 }
+
+int world_push_circle(const World *w, vec3 *p, float r, float y0, float y1) {
+    int ids[48], hit = 0;
+    int n = world_query(w, v3(p->x - r - 0.5f, y0, p->z - r - 0.5f), v3(p->x + r + 0.5f, y1, p->z + r + 0.5f), ids, 48);
+    for (int i = 0; i < n; i++) {
+        const Box *b = &w->box[ids[i]];
+        if (b->mx.y <= y0) continue;
+        float cx = clampf(p->x, b->mn.x, b->mx.x), cz = clampf(p->z, b->mn.z, b->mx.z);
+        float dx = p->x - cx, dz = p->z - cz, d2 = dx * dx + dz * dz;
+        if (d2 < 1e-8f) {
+            float pen[4] = {p->x - b->mn.x, b->mx.x - p->x, p->z - b->mn.z, b->mx.z - p->z};
+            int k = 0; for (int j = 1; j < 4; j++) if (pen[j] < pen[k]) k = j;
+            if (k == 0) p->x = b->mn.x - r; else if (k == 1) p->x = b->mx.x + r;
+            else if (k == 2) p->z = b->mn.z - r; else p->z = b->mx.z + r;
+            hit = 1;
+        } else if (d2 < r * r) {
+            float d = sqrtf(d2);
+            p->x = cx + dx / d * r; p->z = cz + dz / d * r;
+            hit = 1;
+        }
+    }
+    return hit;
+}
+
+void world_add_checkpoints(World *w, const vec3 *pos, int n) {
+    Build walls = {0}, flat = {0};
+    for (int i = 0; i < n; i++) {
+        vec3 c = pos[i];
+        /* jersey barriers forming a broken ring */
+        for (int k = 0; k < 6; k++) {
+            if (k == 2 || k == 5) continue;            /* gaps to walk through */
+            float a = k / 6.0f * 2 * (float)M_PI;
+            float bx = c.x + cosf(a) * 7.5f, bz = c.z + sinf(a) * 7.5f;
+            int along_x = fabsf(cosf(a)) < 0.6f;
+            vec3 mn = v3(bx - (along_x ? 1.6f : 0.35f), 0, bz - (along_x ? 0.35f : 1.6f));
+            vec3 mx = v3(bx + (along_x ? 1.6f : 0.35f), 0.95f, bz + (along_x ? 0.35f : 1.6f));
+            add_box(w, mn, mx, BOX_PROP);
+            b_box(&walls, &flat, mn, mx, 0xffb8b4ac, 0, 0);
+            /* orange hazard stripe */
+            b_box(&walls, &flat, v3(mn.x - 0.01f, 0.55f, mn.z - 0.01f), v3(mx.x + 0.01f, 0.7f, mx.z + 0.01f), 0xff2a8cf0, 0, 0);
+        }
+        /* floodlight mast and a supply crate stack */
+        b_box(&walls, &flat, v3(c.x + 4.8f, 0, c.z + 4.8f), v3(c.x + 5.1f, 7, c.z + 5.1f), 0xff3a3e44, 0, 0);
+        b_box(&walls, &flat, v3(c.x + 4.3f, 7, c.z + 4.3f), v3(c.x + 5.6f, 7.5f, c.z + 5.6f), 0xffd0f4ff, 0, 0);
+        add_box(w, v3(c.x - 5.5f, 0, c.z + 3.5f), v3(c.x - 3.5f, 1.6f, c.z + 5.5f), BOX_PROP);
+        b_box(&walls, &flat, v3(c.x - 5.5f, 0, c.z + 3.5f), v3(c.x - 3.5f, 1.6f, c.z + 5.5f), 0xff3c5a74, 0, 0);
+        add_box(w, v3(c.x - 5.2f, 1.6f, c.z + 3.8f), v3(c.x - 3.8f, 2.8f, c.z + 5.2f), BOX_PROP);
+        b_box(&walls, &flat, v3(c.x - 5.2f, 1.6f, c.z + 3.8f), v3(c.x - 3.8f, 2.8f, c.z + 5.2f), 0xff4a6a84, 0, 0);
+        flush_chunk(w, &walls, &flat, v3(c.x, 3, c.z), 12);
+    }
+    free(walls.v); free(walls.i); free(flat.v); free(flat.i);
+}

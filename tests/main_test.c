@@ -34,7 +34,10 @@ static const Seg script[] = {
 };
 static const float shots[] = {0.5f, 1.6f, 2.6f, 3.4f, 4.6f, 6.3f, 7.6f, 8.6f, 9.8f, 10.35f, 11.7f, 12.4f};
 
+extern int game_skip_intro;
+
 int main(void) {
+    game_skip_intro = 1;
     plat_init();
     if (!game_init()) { printf("init failed\n"); return 1; }
     const float dt = 1.0f / 60.0f;

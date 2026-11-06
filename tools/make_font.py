@@ -4,7 +4,7 @@ import struct, sys
 from PIL import Image, ImageDraw, ImageFont
 out = sys.argv[1] if len(sys.argv) > 1 else 'assets/font.ntex'
 try:
-    font = ImageFont.load_default(size=14)
+    font = ImageFont.load_default(size=13)
 except TypeError:
     font = ImageFont.load_default()
 im = Image.new('RGBA', (256, 96), (255, 255, 255, 0))
@@ -12,7 +12,13 @@ d = ImageDraw.Draw(im)
 for k in range(96):
     ch = chr(32 + k)
     x, y = (k % 16) * 16, (k // 16) * 16
-    d.text((x + 1, y), ch, font=font, fill=(255, 255, 255, 255))
+    # draw each glyph on its own tile so nothing bleeds into neighbouring cells
+    tile = Image.new('RGBA', (16, 16), (255, 255, 255, 0))
+    ImageDraw.Draw(tile).text((1, -1), ch, font=font, fill=(255, 255, 255, 255))
+    px = tile.load()
+    for i in range(16):          # keep a clear 1px border for bilinear filtering
+        px[i, 15] = px[15, i] = (255, 255, 255, 0)
+    im.paste(tile, (x, y))
 im.save(out.replace('.ntex', '_preview.png'))
 widths = bytes(max(3, min(15, int(round(font.getlength(chr(32 + k)))))) for k in range(96))
 open(out.replace('.ntex', '.w'), 'wb').write(widths)

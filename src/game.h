@@ -7,7 +7,7 @@ void game_update(const Input *in, float dt);
 void game_render(void);
 
 /* exposed for the desktop test harness */
-typedef struct { float x, y, z, yaw; int state; float charge; } GameDebug;
+typedef struct { float x, y, z, yaw; int state; float charge, health; int cleared, chain, guards_down; } GameDebug;
 void game_debug(GameDebug *d);
 
 #endif

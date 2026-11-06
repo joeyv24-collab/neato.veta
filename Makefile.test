@@ -3,7 +3,7 @@
 #   make -f Makefile.test && ./neato_test
 CC ?= gcc
 CFLAGS = -O2 -std=gnu99 -Wall -Wno-misleading-indentation
-SRC = tests/main_test.c src/game.c src/world.c src/model.c src/anim.c src/gfx_soft.c src/platform_test.c
+SRC = tests/main_test.c src/game.c src/world.c src/enemy.c src/model.c src/anim.c src/gfx_soft.c src/platform_test.c
 
 neato_test: $(SRC) src/*.h
 	$(CC) $(CFLAGS) -o $@ $(SRC) -lm

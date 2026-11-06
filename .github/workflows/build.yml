@@ -5,6 +5,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   vita:
     runs-on: ubuntu-latest
@@ -43,3 +46,16 @@ jobs:
         with:
           name: neato-vpk
           path: build/neato.vpk
+
+      - name: Publish as a release (download neato.vpk straight from the Releases page)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Build ${{ github.run_number }}
+          make_latest: true
+          body: |
+            Install: copy neato.vpk to your Vita and install it with VitaShell.
+            Needs ur0:data/libshacccg.suprx (install it with ShaRKBR33D if missing).
+            Commit: ${{ github.sha }}
+          files: build/neato.vpk

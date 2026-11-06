@@ -13,11 +13,20 @@ kinetic energy: every fall, sprint and hit charges her up.
 | R (hold) | Sprint. Sprint into a building to run up the wall |
 | X | Jump. Hold X in the air to glide. X on a wall kicks off it |
 | O | Dodge roll. In the air: ground slam (stronger with more charge) |
-| □ | Strike (3-hit combo) |
-| △ | Kinetic blast (costs charge) |
+| □ | Strike: dashes to the nearest guard and chains between them |
+| △ | Counter a guard who's flashing, otherwise kinetic blast (costs charge) |
+| L (hold) | Kinetic sense: see guards through walls |
+| Start | Pause / controls |
 | Start + Select | Quit |
 
 Falling into the flood water puts you back on the last solid ground.
+
+**Goal:** break the six Vantage Security checkpoints (orange light beams in the fog, yellow on the minimap).
+Unaware guards can be taken down silently from behind or by dropping on them from above.
+
+## Getting the .vpk
+
+Every push builds a new release: open the repo's **Releases** page and download `neato.vpk`.
 
 ## Building the .vpk
 

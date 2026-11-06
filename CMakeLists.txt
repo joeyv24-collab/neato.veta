@@ -23,6 +23,7 @@ add_executable(neato
   src/gfx_gl.c
   src/game.c
   src/world.c
+  src/enemy.c
   src/model.c
   src/anim.c
 )
