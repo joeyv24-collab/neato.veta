@@ -21,15 +21,17 @@ jobs:
         shell: bash
         run: |
           set -e
+          # the SDK's GCC 15 defaults to C23, which these libraries predate
+          OLDC="arm-vita-eabi-gcc -std=gnu17"
           mkdir -p /tmp/deps && cd /tmp/deps
           git clone --depth 1 https://github.com/bythos14/SceShaccCgExt
-          (cd SceShaccCgExt && mkdir -p build && cd build && cmake .. && make -j"$(nproc)" install)
+          (cd SceShaccCgExt && mkdir -p build && cd build && cmake .. -DCMAKE_C_FLAGS="-std=gnu17" && make -j"$(nproc)" install)
           git clone --depth 1 https://github.com/Rinnegatamante/math-neon
-          (cd math-neon && make -j"$(nproc)" install)
+          (cd math-neon && make -j"$(nproc)" CC="$OLDC" install)
           git clone --depth 1 https://github.com/Rinnegatamante/vitaShaRK
-          (cd vitaShaRK && make -j"$(nproc)" install)
+          (cd vitaShaRK && make -j"$(nproc)" CC="$OLDC" install)
           git clone --depth 1 https://github.com/Rinnegatamante/vitaGL
-          (cd vitaGL && make -j"$(nproc)" install)
+          (cd vitaGL && make -j"$(nproc)" CC="$OLDC" install)
 
       - name: Build game
         shell: bash
