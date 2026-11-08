@@ -23,7 +23,7 @@ TATTOOS = [
     dict(name='bat (right hip)', image='tattoo_bat.json',
          centre=(-0.083, 1.088, 0.09), out=(-0.6, 0.0, 0.8), width=0.085),
     dict(name='hooded skull (left shoulder)', image='tattoo_skull.png',
-         centre=(0.12, 1.395, 0.005), out=(0.75, 0.6, 0.3), width=0.055),
+         centre=(0.12, 1.402, -0.014), out=(0.9, 0.4, 0.0), width=0.034),
 ]
 
 
