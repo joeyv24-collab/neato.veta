@@ -11,13 +11,16 @@ kinetic energy: every fall, sprint and hit charges her up.
 | Left stick | Move |
 | Right stick | Camera |
 | R (hold) | Sprint. Sprint into a building to run up the wall |
-| X | Jump. Hold X in the air to glide. X on a wall kicks off it |
-| O | Dodge roll. In the air: ground slam (stronger with more charge) |
+| X | Jump. Hold X in the air to mist glide. X on a wall kicks off it |
+| O | Mist dash (pass through guards and attacks). In the air: smoke slam |
 | □ | Strike: dashes to the nearest guard and chains between them |
-| △ | Counter a guard who's flashing, otherwise kinetic blast (costs charge) |
-| L (hold) | Kinetic sense: see guards through walls |
+| △ | Counter a guard who's flashing, otherwise throw a smoke bomb |
+| L (hold) + R | Aim and fire smoke bolts |
+| D-pad Up | Mist sense: see guards through walls |
 | Start | Pause / controls |
-| Start + Select | Quit |
+
+Neato breathed in the smoke when the reactor barge burned and can now become it. Her mist meter
+refills over time and with every hit she lands.
 
 Falling into the flood water puts you back on the last solid ground.
 

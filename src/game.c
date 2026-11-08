@@ -29,7 +29,7 @@
 static const float FOG_RGB[3] = {0.62f, 0.66f, 0.70f};
 static const float SKY_TOP[3] = {0.30f, 0.38f, 0.52f};
 
-typedef enum { PS_GROUND, PS_AIR, PS_GLIDE, PS_WALLRUN, PS_LEDGE, PS_SLAM, PS_DODGE, PS_ATTACK, PS_LAND } PState;
+typedef enum { PS_GROUND, PS_AIR, PS_GLIDE, PS_WALLRUN, PS_LEDGE, PS_SLAM, PS_DODGE, PS_ATTACK, PS_LAND, PS_ROLL } PState;
 
 typedef struct {
     vec3 pos, vel;
@@ -47,6 +47,8 @@ typedef struct {
     float respawn_fade;
     int target, hit_done, chain, best_chain, takedowns;
     float chain_t, invuln, hurt_t, scan;
+    float aim, fire_cd, skid_t, land_t;
+    int sense;
     float jump_buf, tri_buf, coyote, bank, spin, last_yaw;
     int finisher;
     Animator anim;
@@ -59,7 +61,7 @@ typedef struct {
     float shake, idle_t;
 } Camera;
 
-typedef struct { vec3 p, v; float life, max_life, size; uint32_t col; int additive, ground; } Particle;
+typedef struct { vec3 p, v; float life, max_life, size, grow; uint32_t col; int additive, ground; } Particle;
 #define MAX_PART 384
 
 static World world;
@@ -81,10 +83,10 @@ static GState gstate = GS_TITLE;
 /* ---- story missions ---- */
 typedef struct { const char *title, *brief; } MissionDef;
 static const MissionDef MISSIONS[] = {
-    {"Rooftops",     "Test your new body: run up a tower, glide, then slam down."},
+    {"Rooftops",     "Test your new body: run up a tower, glide on the mist, then slam down."},
     {"First Strike", "Break the Vantage checkpoint south of the plaza."},
     {"Making Noise", "Break two more checkpoints. Let Vantage know you're here."},
-    {"Ghost",        "Break a checkpoint without being spotted. Hold L, strike from behind or above."},
+    {"Ghost",        "Break a checkpoint unseen. Up for mist sense; smoke bombs blind guards."},
     {"Lockdown",     "Break every Vantage checkpoint in Zone 3."},
     {"The Warden",   "Storm Vantage field HQ in the southeast and take down the Warden."},
 };
@@ -96,6 +98,16 @@ typedef struct { char magic[4]; int version, mission, cleared_mask, best_chain, 
 static float banner_t; static char banner[64];
 static float dead_t;
 static float hitstop;      /* brief freeze on impact */
+
+/* smoke powers */
+#define SMOKE_COL  rgba32(62, 60, 74, 175)
+#define MIST_COL   rgba32(196, 186, 236, 255)
+#define BOLT_COST  5.0f
+#define BOMB_COST  25.0f
+typedef struct { vec3 p, v; float life; } Bolt;
+typedef struct { vec3 p; float t; } Cloud;
+static Bolt bolts[16];
+static Cloud clouds[4];
 int game_skip_intro = 0;
 
 /* ------------------------------------------------------------------ */
@@ -132,9 +144,28 @@ static int make_dot(int ring) {
 static void fx_spawn(vec3 p, vec3 v, float life, float size, uint32_t col, int additive, int ground) {
     for (int i = 0; i < MAX_PART; i++) if (parts[i].life <= 0) {
         Particle *q = &parts[i];
-        q->p = p; q->v = v; q->life = q->max_life = life; q->size = size; q->col = col;
+        q->p = p; q->v = v; q->life = q->max_life = life; q->size = size; q->col = col; q->grow = 0;
         q->additive = additive; q->ground = ground;
         return;
+    }
+}
+
+/* a puff of smoke: grows, drifts up and fades */
+static void fx_smoke(vec3 p, vec3 v, float life, float size) {
+    for (int i = 0; i < MAX_PART; i++) if (parts[i].life <= 0) {
+        Particle *q = &parts[i];
+        q->p = p; q->v = v; q->life = q->max_life = life; q->size = size; q->grow = size * 1.6f;
+        int g = 55 + (int)(rng_float(&fx_rng) * 25);
+        q->col = rgba32(g, g - 2, g + 12, 170);
+        q->additive = 0; q->ground = 0;
+        return;
+    }
+}
+
+static void fx_smoke_burst(vec3 p, int n, float speed, float size) {
+    for (int i = 0; i < n; i++) {
+        vec3 d = v3norm(v3(rng_range(&fx_rng, -1, 1), rng_range(&fx_rng, -0.2f, 1), rng_range(&fx_rng, -1, 1)));
+        fx_smoke(v3add(p, v3scale(d, 0.3f)), v3scale(d, speed * rng_range(&fx_rng, 0.3f, 1.0f)), rng_range(&fx_rng, 0.6f, 1.3f), size * rng_range(&fx_rng, 0.6f, 1.2f));
     }
 }
 
@@ -147,13 +178,13 @@ static void fx_burst(vec3 p, int n, float speed, uint32_t col) {
 }
 
 static void fx_shockwave(vec3 p, float size) {
-    fx_spawn(v3add(p, v3(0, 0.05f, 0)), v3(size * 2.5f, 0, 0), 0.45f, 0.5f, rgba32(140, 230, 255, 255), 1, 1);
-    fx_spawn(v3add(p, v3(0, 0.07f, 0)), v3(size * 1.4f, 0, 0), 0.6f, 0.3f, rgba32(255, 255, 255, 200), 0, 1);
-    fx_burst(v3add(p, v3(0, 0.3f, 0)), 26, 9 * size, rgba32(120, 220, 255, 255));
-    for (int i = 0; i < 14; i++) {   /* dust */
-        float a = i / 14.0f * 2 * (float)M_PI;
-        fx_spawn(v3add(p, v3(cosf(a) * 0.8f, 0.2f, sinf(a) * 0.8f)), v3(cosf(a) * 7 * size, 1.5f, sinf(a) * 7 * size),
-                 0.8f, 0.9f, rgba32(170, 165, 155, 140), 0, 0);
+    fx_spawn(v3add(p, v3(0, 0.05f, 0)), v3(size * 2.5f, 0, 0), 0.45f, 0.5f, MIST_COL, 1, 1);
+    fx_spawn(v3add(p, v3(0, 0.07f, 0)), v3(size * 1.4f, 0, 0), 0.6f, 0.3f, rgba32(90, 85, 110, 200), 0, 1);
+    fx_burst(v3add(p, v3(0, 0.3f, 0)), 12, 7 * size, MIST_COL);
+    for (int i = 0; i < 16; i++) {   /* a ring of smoke rolling outwards */
+        float a = i / 16.0f * 2 * (float)M_PI;
+        fx_smoke(v3add(p, v3(cosf(a) * 0.8f, 0.3f, sinf(a) * 0.8f)), v3(cosf(a) * 7 * size, 0.8f, sinf(a) * 7 * size),
+                 1.0f, 0.7f * size);
     }
 }
 
@@ -165,7 +196,8 @@ static void fx_update(float dt) {
         if (q->ground) { q->size += q->v.x * dt; continue; }    /* rings grow */
         q->p = v3add(q->p, v3scale(q->v, dt));
         q->v = v3scale(q->v, 1.0f - 2.5f * dt);
-        q->v.y -= 4.0f * dt;
+        if (q->grow > 0) { q->size += q->grow * dt; q->v.y += 0.8f * dt; }   /* smoke rises */
+        else q->v.y -= 4.0f * dt;
     }
 }
 
@@ -308,21 +340,20 @@ static void land(void) {
         slam_damage(power);
         slam_done = 1;
         cam.shake = 0.6f;
-        pl.charge = clampf(pl.charge - 30, 0, 100);
+        pl.charge = clampf(pl.charge - 20, 0, 100);
+        enemies_blind(&foes, pl.pos, 4.0f + power * 2, 1.5f);
         pl.vel.x = pl.vel.z = 0;
         set_state(PS_LAND);
         anim_play(&pl.anim, ANIM_LAND, 0.05f);
         return;
     }
-    /* falling builds kinetic charge: Neato absorbs impacts */
-    pl.charge = clampf(pl.charge + impact * 0.8f, 0, 100);
     float hs = sqrtf(pl.vel.x * pl.vel.x + pl.vel.z * pl.vel.z);
     if (impact > 20 && hs > 5) {
         /* carry the momentum into a roll instead of stopping dead */
         fx_shockwave(pl.pos, 0.45f);
         cam.shake = 0.2f;
         pl.yaw = atan2f(pl.vel.x, pl.vel.z);
-        set_state(PS_DODGE);
+        set_state(PS_ROLL);
         anim_play(&pl.anim, ANIM_DODGE, 0.04f);
     } else if (impact > 20) {
         fx_shockwave(pl.pos, 0.6f);
@@ -332,6 +363,7 @@ static void land(void) {
         anim_play(&pl.anim, ANIM_LAND, 0.05f);
     } else {
         set_state(PS_GROUND);
+        if (impact > 7) { pl.land_t = 0.2f; anim_play(&pl.anim, ANIM_LAND_SOFT, 0.04f); }
         if (pl.jump_buf > 0) pl.jump_buf = 0.12f;     /* buffered jump fires next frame */
     }
 }
@@ -343,7 +375,7 @@ static void land(void) {
 static void chain_add(int n) {
     pl.chain += n; pl.chain_t = 0;
     if (pl.chain > pl.best_chain) pl.best_chain = pl.chain;
-    pl.charge = clampf(pl.charge + 2.0f + pl.chain * 0.4f, 0, 100);
+    pl.charge = clampf(pl.charge + 3.0f + pl.chain * 0.3f, 0, 100);
 }
 
 static void show_banner(const char *t) {
@@ -377,13 +409,14 @@ static void start_strike(vec3 dir, float mag) {
         if (!enemy_aware(&foes, t)) {
             vec3 ef = v3(sinf(e->yaw), 0, cosf(e->yaw));
             vec3 to_me = v3norm(v3sub(pl.pos, e->pos));
-            int behind = v3dot(ef, to_me) < -0.2f;
+            int behind = v3dot(ef, to_me) < -0.2f || e->blind > 0;
             int above = pl.pos.y > e->pos.y + 1.5f;
             float d = v3len(v3sub(e->pos, pl.pos));
             if ((behind && d < 3.5f) || (above && d < 6.0f)) {
                 int before = enemies_groups_cleared(&foes);
                 enemy_takedown(&foes, t);
                 pl.takedowns++;
+                pl.charge = clampf(pl.charge + 12, 0, 100);
                 pl.pos = v3add(e->pos, v3scale(v3norm(v3sub(pl.pos, e->pos)), 0.9f));
                 pl.pos.y = e->pos.y;
                 pl.grounded = 1; pl.vel = v3(0, 0, 0);
@@ -415,7 +448,7 @@ static void attack_update(const Input *in, vec3 dir, float mag, float dt) {
         float want = dist > 1.1f ? fminf((dist - 1.0f) / fmaxf(0.14f - pl.st_t, 0.03f), 38.0f) : 0;
         pl.vel.x = f.x * want; pl.vel.z = f.z * want;
         if (want > 12 && ((int)(game_time * 60)) % 2 == 0)
-            fx_spawn(v3add(pl.pos, v3(0, 1.0f, 0)), v3(0, 0, 0), 0.25f, 0.18f, rgba32(140, 230, 255, 200), 1, 0);
+            fx_smoke(v3add(pl.pos, v3(0, 1.0f, 0)), v3(0, 0.3f, 0), 0.5f, 0.25f);
         if (pl.st_t >= 0.12f) {
             pl.hit_done = 1;
             if (dist < 2.2f && enemy_alive(e)) {
@@ -426,8 +459,9 @@ static void attack_update(const Input *in, vec3 dir, float mag, float dt) {
                 chain_add(1);
                 hitstop = fin ? 0.12f : kick ? 0.07f : 0.045f;
                 cam.shake = fmaxf(cam.shake, fin ? 0.4f : kick ? 0.22f : 0.1f);
-                fx_burst(v3add(e->pos, v3(0, 1.3f, 0)), fin ? 26 : kick ? 14 : 8, fin ? 10 : kick ? 7 : 4, rgba32(140, 230, 255, 255));
-                if (fin) { fx_shockwave(e->pos, 0.5f); show_banner("KINETIC FINISHER"); }
+                fx_burst(v3add(e->pos, v3(0, 1.3f, 0)), fin ? 16 : kick ? 10 : 6, fin ? 9 : kick ? 6 : 4, MIST_COL);
+                fx_smoke_burst(v3add(e->pos, v3(0, 1.2f, 0)), fin ? 8 : 3, 3, 0.25f);
+                if (fin) { fx_shockwave(e->pos, 0.5f); show_banner("SMOKE FINISHER"); }
                 check_cleared(before);
             }
         }
@@ -440,7 +474,8 @@ static void attack_update(const Input *in, vec3 dir, float mag, float dt) {
     if ((in->pressed & BTN_CIRCLE) && pl.st_t > 0.1f) {        /* cancel into a dodge */
         vec3 d = mag > 0 ? dir : v3scale(f, -1);
         face_towards(d, 100, 1);
-        set_state(PS_DODGE); anim_play(&pl.anim, ANIM_DODGE, 0.05f);
+        set_state(PS_DODGE);
+        fx_smoke_burst(v3add(pl.pos, v3(0, 1.0f, 0)), 6, 2, 0.35f);
         return;
     }
     float len = pl.target >= 0 ? 0.3f : 0.34f;
@@ -452,10 +487,9 @@ static void attack_update(const Input *in, vec3 dir, float mag, float dt) {
     }
 }
 
-/* triangle: counter a guard who is winding up, otherwise a kinetic blast */
+/* triangle: counter a guard who is winding up, otherwise a smoke bomb */
 static void counter_or_blast(void) {
     int c = enemies_counterable(&foes, pl.pos, 5.0f);
-    vec3 o;
     if (c >= 0) {
         Enemy *e = &foes.e[c];
         face_point(e->pos);
@@ -473,31 +507,99 @@ static void counter_or_blast(void) {
         check_cleared(before);
         return;
     }
-    if (pl.charge < 15) return;
-    pl.charge -= 15;
+    if (pl.charge < BOMB_COST) return;
+    /* smoke bomb: a cloud that blinds guards and hides Neato */
+    pl.charge -= BOMB_COST;
     set_state(PS_ATTACK); pl.combo = 0; pl.target = -1; pl.hit_done = 1;
-    anim_play(&pl.anim, ANIM_BLAST, 0.05f);
-    o = v3add(pl.pos, v3add(v3scale(facing(), 0.6f), v3(0, 1.3f, 0)));
-    for (int i = 0; i < 20; i++)
-        fx_spawn(o, v3add(v3scale(facing(), rng_range(&fx_rng, 14, 24)),
-                          v3(rng_range(&fx_rng, -2, 2), rng_range(&fx_rng, -1, 2), rng_range(&fx_rng, -2, 2))),
-                 0.5f, 0.25f, rgba32(140, 230, 255, 255), 1, 0);
-    cam.shake = 0.15f;
-    int before = enemies_groups_cleared(&foes);
-    vec3 f = facing();
+    anim_play(&pl.anim, ANIM_THROW, 0.05f);
+    for (int i = 0; i < 4; i++) if (clouds[i].t <= 0) { clouds[i].p = pl.pos; clouds[i].t = 7.0f; break; }
+    enemies_blind(&foes, pl.pos, 6.5f, 4.0f);
+    fx_smoke_burst(v3add(pl.pos, v3(0, 0.8f, 0)), 30, 6, 0.9f);
+    cam.shake = 0.12f;
+}
+
+/* where the reticle points: a guard under the crosshair (aim assist) or the
+ * first thing the camera ray hits */
+static vec3 aim_point(void) {
+    vec3 from = cam.pos, f = cam.fwd;
+    int best = -1; float bestc = cosf(DEG2RAD(10));
     for (int i = 0; i < foes.n; i++) {
         Enemy *e = &foes.e[i];
-        if (!enemy_alive(e)) continue;
-        vec3 d = v3sub(e->pos, pl.pos);
-        if (fabsf(d.y) > 2.5f) continue;
-        d.y = 0;
+        if (!enemy_alive(e) || !foes.group_active[e->group]) continue;
+        vec3 d = v3sub(v3add(e->pos, v3(0, 1.3f, 0)), from);
         float l = v3len(d);
-        if (l < 11 && l > 0.01f && v3dot(v3scale(d, 1 / l), f) > 0.55f) {
-            enemy_hit(&foes, i, 2, pl.pos, 15.0f, 4.5f);
-            chain_add(1);
-        }
+        if (l > 50 || l < 1) continue;
+        float c = v3dot(v3scale(d, 1 / l), f);
+        float tt;
+        if (world_raycast(&world, from, v3add(e->pos, v3(0, 1.3f, 0)), &tt, NULL)) continue;   /* behind cover */
+        if (c > bestc) { bestc = c; best = i; }
     }
-    check_cleared(before);
+    if (best >= 0) return v3add(foes.e[best].pos, v3(0, 1.3f, 0));
+    vec3 far = v3add(from, v3scale(f, 60));
+    float t;
+    if (world_raycast(&world, from, far, &t, NULL)) return v3add(from, v3scale(f, 60 * t));
+    return far;
+}
+
+static void fire_bolt(void) {
+    vec3 f = facing(), right = v3(-f.z, 0, f.x);
+    vec3 hand = v3add(pl.pos, v3add(v3scale(right, -0.35f), v3add(v3scale(f, 0.5f), v3(0, 1.35f, 0))));
+    vec3 dir = v3norm(v3sub(aim_point(), hand));
+    for (int i = 0; i < 16; i++) if (bolts[i].life <= 0) {
+        bolts[i].p = hand; bolts[i].v = v3scale(dir, 48); bolts[i].life = 1.2f;
+        break;
+    }
+    pl.charge -= BOLT_COST;
+    pl.fire_cd = 0.22f;
+    fx_smoke_burst(hand, 3, 2, 0.15f);
+    cam.shake = fmaxf(cam.shake, 0.05f);
+}
+
+static void bolts_update(float dt) {
+    for (int i = 0; i < 16; i++) {
+        Bolt *b = &bolts[i];
+        if (b->life <= 0) continue;
+        b->life -= dt;
+        vec3 next = v3add(b->p, v3scale(b->v, dt));
+        int hit = 0;
+        for (int k = 0; k < foes.n && !hit; k++) {
+            Enemy *e = &foes.e[k];
+            if (!enemy_alive(e) || !foes.group_active[e->group]) continue;
+            /* distance from the guard's body axis to this step of the bolt */
+            vec3 c = v3add(e->pos, v3(0, 1.1f, 0)), d = v3sub(next, b->p);
+            float t = clampf(v3dot(v3sub(c, b->p), d) / fmaxf(v3dot(d, d), 1e-6f), 0, 1);
+            vec3 q = v3add(b->p, v3scale(d, t));
+            if (v3len(v3sub(q, c)) < 0.75f) {
+                int before = enemies_groups_cleared(&foes);
+                enemy_hit(&foes, k, 1, b->p, 6.0f, 1.5f);
+                chain_add(1);
+                fx_smoke_burst(q, 6, 3, 0.3f);
+                fx_burst(q, 6, 4, MIST_COL);
+                check_cleared(before);
+                hit = 1;
+            }
+        }
+        float t;
+        if (!hit && world_raycast(&world, b->p, next, &t, NULL)) {
+            fx_smoke_burst(v3lerp(b->p, next, t), 4, 2, 0.25f);
+            hit = 1;
+        }
+        if (hit) { b->life = 0; continue; }
+        b->p = next;
+        fx_smoke(b->p, v3(0, 0.1f, 0), 0.45f, 0.14f);
+    }
+    for (int c = 0; c < 4; c++) {
+        Cloud *cl = &clouds[c];
+        if (cl->t <= 0) continue;
+        cl->t -= dt;
+        if (((int)(game_time * 30)) % 2 == 0) {
+            float a = rng_range(&fx_rng, 0, 6.28f), r = rng_range(&fx_rng, 0, 5.0f);
+            fx_smoke(v3add(cl->p, v3(cosf(a) * r, rng_range(&fx_rng, 0.2f, 2.2f), sinf(a) * r)),
+                     v3(0, 0.15f, 0), 1.6f, 1.0f);
+        }
+        if (((int)(game_time * 4)) != ((int)((game_time - dt) * 4)))
+            enemies_blind(&foes, cl->p, 5.5f, 1.2f);     /* keep choking anyone inside */
+    }
 }
 
 static void slam_damage(float power) {
@@ -526,6 +628,16 @@ static void player_update(const Input *in, float dt) {
     pl.jump_buf = (in->pressed & BTN_CROSS) ? 0.15f : fmaxf(0, pl.jump_buf - dt);
     pl.tri_buf = (in->pressed & BTN_TRIANGLE) ? 0.18f : fmaxf(0, pl.tri_buf - dt);
     pl.coyote = fmaxf(0, pl.coyote - dt);
+    /* hold L to aim, R fires smoke bolts */
+    int can_aim = pl.st == PS_GROUND || pl.st == PS_AIR || pl.st == PS_LAND;
+    pl.aim = approachf(pl.aim, (in->held & BTN_L) && can_aim ? 1.0f : 0.0f, dt * 8);
+    pl.fire_cd = fmaxf(0, pl.fire_cd - dt);
+    if (pl.aim > 0.5f) {
+        pl.yaw = cam.yaw;
+        sprint = 0;
+        if ((in->held & BTN_R) && pl.fire_cd <= 0 && pl.charge >= BOLT_COST) fire_bolt();
+    } else pl.charge = clampf(pl.charge + 5.0f * dt, 0, 100);      /* mist slowly gathers */
+    if (in->pressed & BTN_UP) pl.sense = !pl.sense;
     /* a counter pressed a moment early still counts */
     if (pl.tri_buf > 0 && !(in->pressed & BTN_TRIANGLE) && pl.grounded &&
         (pl.st == PS_GROUND || pl.st == PS_ATTACK) && enemies_counterable(&foes, pl.pos, 5.0f) >= 0) {
@@ -535,7 +647,7 @@ static void player_update(const Input *in, float dt) {
 
     switch (pl.st) {
     case PS_GROUND: case PS_LAND: case PS_ATTACK: {
-        float speed = mag * (sprint ? SPRINT_SPEED : RUN_SPEED);
+        float speed = mag * (sprint ? SPRINT_SPEED : (pl.aim > 0.5f ? 4.0f : RUN_SPEED));
         float accel = sprint ? 30.0f : 45.0f;
         if (pl.st == PS_LAND) { speed = 0; if (pl.st_t > 0.28f) set_state(PS_GROUND); }
         if (pl.st == PS_ATTACK) {
@@ -546,8 +658,16 @@ static void player_update(const Input *in, float dt) {
         vec3 target = v3scale(dir, speed);
         pl.vel.x = approachf(pl.vel.x, target.x, accel * dt);
         pl.vel.z = approachf(pl.vel.z, target.z, accel * dt);
-        if (mag > 0) face_towards(dir, sprint ? 9.0f : 13.0f, dt);
-        if (sprint && mag > 0.5f) pl.charge = clampf(pl.charge + 3.0f * dt, 0, 100);
+        if (mag > 0 && pl.aim < 0.5f) face_towards(dir, sprint ? 9.0f : 13.0f, dt);
+        /* skid when stopping or reversing at speed */
+        float hs_now = sqrtf(pl.vel.x * pl.vel.x + pl.vel.z * pl.vel.z);
+        if (pl.st == PS_GROUND && pl.skid_t <= 0 && hs_now > 9 &&
+            (mag < 0.1f || v3dot(dir, v3scale(v3(pl.vel.x, 0, pl.vel.z), 1 / hs_now)) < -0.5f)) {
+            pl.skid_t = 0.32f;
+            anim_play(&pl.anim, ANIM_SKID, 0.05f);
+            for (int i = 0; i < 4; i++) fx_smoke(v3add(pl.pos, v3(0, 0.1f, 0)), v3(rng_range(&fx_rng, -1, 1), 0.5f, rng_range(&fx_rng, -1, 1)), 0.6f, 0.2f);
+        }
+        pl.skid_t = fmaxf(0, pl.skid_t - dt);
         if (pl.st != PS_GROUND) break;
         if (pl.jump_buf > 0) {
             pl.jump_buf = 0;
@@ -557,12 +677,12 @@ static void player_update(const Input *in, float dt) {
             anim_play(&pl.anim, ANIM_JUMP, 0.08f);
             fx_spawn(pl.pos, v3(0, 0, 0), 0.4f, 0.2f, rgba32(255, 255, 255, 150), 0, 1);
         } else if (in->pressed & BTN_CIRCLE) {
+            /* mist dash: become smoke, pass through guards and blows */
             vec3 d = mag > 0 ? dir : facing();
             face_towards(d, 100, 1);
-            pl.vel = v3scale(d, 15);
             set_state(PS_DODGE);
-            anim_play(&pl.anim, ANIM_DODGE, 0.05f);
-        } else if (in->pressed & BTN_SQUARE) {
+            fx_smoke_burst(v3add(pl.pos, v3(0, 1.0f, 0)), 6, 2, 0.35f);
+        } else if ((in->pressed & BTN_SQUARE) && pl.aim < 0.5f) {
             pl.combo = 0; pl.queued = 0;
             start_strike(dir, mag);
         } else if (in->pressed & BTN_TRIANGLE) {
@@ -590,7 +710,19 @@ static void player_update(const Input *in, float dt) {
         }
     } break;
 
-    case PS_DODGE: {
+    case PS_DODGE: {      /* mist dash */
+        vec3 f = facing();
+        float k = pl.st_t < 0.22f ? 1.0f : 0.35f;
+        pl.vel.x = f.x * 24 * k; pl.vel.z = f.z * 24 * k;
+        fx_smoke(v3add(pl.pos, v3(rng_range(&fx_rng, -0.2f, 0.2f), rng_range(&fx_rng, 0.4f, 1.5f), rng_range(&fx_rng, -0.2f, 0.2f))),
+                 v3(0, 0.2f, 0), 0.7f, 0.3f);
+        if (pl.st_t > 0.3f) {
+            fx_smoke_burst(v3add(pl.pos, v3(0, 1.0f, 0)), 5, 2, 0.3f);
+            set_state(pl.grounded ? PS_GROUND : PS_AIR);
+        }
+    } break;
+
+    case PS_ROLL: {       /* momentum roll after a big drop */
         float k = 1.0f - pl.st_t / 0.45f;
         vec3 f = facing();
         pl.vel.x = f.x * 15 * k; pl.vel.z = f.z * 15 * k;
@@ -606,12 +738,11 @@ static void player_update(const Input *in, float dt) {
             pl.vel.x = approachf(pl.vel.x, f.x * GLIDE_SPEED, 20 * dt);
             pl.vel.z = approachf(pl.vel.z, f.z * GLIDE_SPEED, 20 * dt);
             pl.vel.y = fmaxf(pl.vel.y - GRAVITY * dt, -GLIDE_SINK);
-            pl.charge = clampf(pl.charge + 1.5f * dt, 0, 100);
-            if (((int)(game_time * 30)) % 2 == 0) {
+            if (((int)(game_time * 30)) % 2 == 0) {        /* mist streaming off her arms */
                 vec3 h = v3add(pl.pos, v3(0, 1.0f, 0));
                 vec3 side = v3scale(v3(-f.z, 0, f.x), 0.9f);
-                fx_spawn(v3add(h, side), v3(0, 0, 0), 0.35f, 0.1f, rgba32(140, 230, 255, 255), 1, 0);
-                fx_spawn(v3sub(h, side), v3(0, 0, 0), 0.35f, 0.1f, rgba32(140, 230, 255, 255), 1, 0);
+                fx_smoke(v3add(h, side), v3(0, 0.2f, 0), 0.6f, 0.14f);
+                fx_smoke(v3sub(h, side), v3(0, 0.2f, 0), 0.6f, 0.14f);
             }
         } else {
             pl.vel.y -= GRAVITY * dt;
@@ -621,7 +752,7 @@ static void player_update(const Input *in, float dt) {
             if (mag > 0) {
                 pl.vel.x = approachf(pl.vel.x, t.x, 14 * dt);
                 pl.vel.z = approachf(pl.vel.z, t.z, 14 * dt);
-                face_towards(dir, 6, dt);
+                if (pl.aim < 0.5f) face_towards(dir, 6, dt);
             }
             if ((in->pressed & BTN_CROSS) && pl.coyote > 0) {            /* late jump off a ledge */
                 pl.coyote = 0; pl.jump_buf = 0;
@@ -654,7 +785,7 @@ static void player_update(const Input *in, float dt) {
                 break;
             }
         }
-        if (in->pressed & BTN_CIRCLE) {
+        if ((in->pressed & BTN_CIRCLE) && pl.aim < 0.5f) {
             set_state(PS_SLAM);
             pl.vel = v3(0, -SLAM_VEL, 0);
             anim_play(&pl.anim, ANIM_SLAM, 0.05f);
@@ -667,7 +798,6 @@ static void player_update(const Input *in, float dt) {
         vec3 n = pl.wall_n;
         pl.yaw = atan2f(-n.x, -n.z);
         pl.vel = v3add(v3(0, WALLRUN_VEL, 0), v3scale(n, -2.0f));     /* stick to the wall */
-        pl.charge = clampf(pl.charge + 2.0f * dt, 0, 100);
         if (mag < 0.3f || v3dot(dir, n) > -0.2f) pl.off_wall_t += dt; else pl.off_wall_t = 0;
         if (in->pressed & BTN_CROSS) {         /* kick off the wall */
             pl.vel = v3add(v3scale(n, 9), v3(0, 10, 0));
@@ -715,7 +845,7 @@ static void player_update(const Input *in, float dt) {
             pl.pos.y = floor_y;
             land();
         }
-        if (!pl.grounded && (pl.st == PS_DODGE || pl.st == PS_ATTACK || pl.st == PS_LAND))
+        if (!pl.grounded && (pl.st == PS_DODGE || pl.st == PS_ROLL || pl.st == PS_ATTACK || pl.st == PS_LAND))
             pl.vel.y -= GRAVITY * dt;
     }
     if (pl.grounded && world_on_land(pl.pos.x, pl.pos.z) && pl.st == PS_GROUND)
@@ -737,12 +867,16 @@ static void player_update(const Input *in, float dt) {
     switch (pl.st) {
     case PS_GROUND:
         pl.anim.speed = hs;
-        if (hs < 0.5f) anim_play(&pl.anim, ANIM_IDLE, 0.2f);
+        if (pl.aim > 0.5f) anim_play(&pl.anim, ANIM_AIM, 0.1f);
+        else if (pl.skid_t > 0) anim_play(&pl.anim, ANIM_SKID, 0.05f);
+        else if (pl.land_t > 0) anim_play(&pl.anim, ANIM_LAND_SOFT, 0.04f);
+        else if (hs < 0.5f) anim_play(&pl.anim, ANIM_IDLE, 0.2f);
         else if (hs > RUN_SPEED + 1.5f) anim_play(&pl.anim, ANIM_SPRINT, 0.15f);
         else anim_play(&pl.anim, ANIM_RUN, 0.15f);
         break;
     case PS_AIR:
-        if (pl.anim.cur != ANIM_JUMP || pl.vel.y < 0) anim_play(&pl.anim, ANIM_FALL, 0.3f);
+        if (pl.aim > 0.5f) anim_play(&pl.anim, ANIM_AIM, 0.1f);
+        else if (pl.anim.cur != ANIM_JUMP || pl.vel.y < 0) anim_play(&pl.anim, ANIM_FALL, 0.3f);
         break;
     case PS_GLIDE: anim_play(&pl.anim, ANIM_GLIDE, 0.2f); break;
     case PS_WALLRUN:
@@ -750,10 +884,12 @@ static void player_update(const Input *in, float dt) {
         anim_play(&pl.anim, ANIM_WALLRUN, 0.1f);
         target_pitch = -0.35f; pivot = 0.9f;      /* lean back, feet planted on the wall */
         break;
-    case PS_DODGE: target_pitch = pl.st_t / 0.45f * 2 * (float)M_PI; pivot = 0.55f; break;
+    case PS_ROLL: target_pitch = pl.st_t / 0.45f * 2 * (float)M_PI; pivot = 0.55f; break;
+    case PS_DODGE: anim_play(&pl.anim, ANIM_SPRINT, 0.05f); pl.anim.speed = 24; break;
     default: break;
     }
-    if (pl.st == PS_DODGE) pl.body_pitch = target_pitch;
+    pl.land_t = fmaxf(0, pl.land_t - dt);
+    if (pl.st == PS_ROLL) pl.body_pitch = target_pitch;
     else {
         if (pl.body_pitch > (float)M_PI) pl.body_pitch -= 2 * (float)M_PI;
         pl.body_pitch = lerpf(pl.body_pitch, target_pitch, clampf(14 * dt, 0, 1));
@@ -774,11 +910,10 @@ static void player_update(const Input *in, float dt) {
     if (pl.blink_t < 0) { pl.blink = 0.14f; pl.blink_t = rng_range(&fx_rng, 2.5f, 5.0f); }
     pl.blink -= dt;
 
-    /* kinetic sparks while sprinting */
+    /* smoke wisps off her heels while sprinting */
     if (pl.st == PS_GROUND && hs > RUN_SPEED + 3 && ((int)(game_time * 60)) % 3 == 0)
-        fx_spawn(v3add(pl.pos, v3(rng_range(&fx_rng, -0.2f, 0.2f), 0.1f, rng_range(&fx_rng, -0.2f, 0.2f))),
-                 v3(rng_range(&fx_rng, -1, 1), 1.5f, rng_range(&fx_rng, -1, 1)), 0.4f, 0.09f,
-                 rgba32(140, 230, 255, 255), 1, 0);
+        fx_smoke(v3add(pl.pos, v3(rng_range(&fx_rng, -0.2f, 0.2f), 0.2f, rng_range(&fx_rng, -0.2f, 0.2f))),
+                 v3(rng_range(&fx_rng, -0.5f, 0.5f), 0.6f, rng_range(&fx_rng, -0.5f, 0.5f)), 0.6f, 0.12f);
 }
 
 /* ------------------------------------------------------------------ */
@@ -788,6 +923,8 @@ static void camera_update(const Input *in, float dt) {
     float rx = fabsf(in->rx) > 0.15f ? in->rx : 0, ry = fabsf(in->ry) > 0.15f ? in->ry : 0;
     cam.yaw -= rx * 2.8f * dt;
     cam.pitch = clampf(cam.pitch + ry * 1.9f * dt, -0.45f, 1.25f);
+    /* aiming levels the camera out so the reticle looks down the street, not at her feet */
+    if (pl.aim > 0.1f && ry == 0 && cam.pitch > 0.03f) cam.pitch = approachf(cam.pitch, 0.03f, dt * 1.5f * pl.aim);
     if (rx == 0 && ry == 0) cam.idle_t += dt; else cam.idle_t = 0;
     /* drift behind the player when moving fast and the stick is idle */
     float hs = sqrtf(pl.vel.x * pl.vel.x + pl.vel.z * pl.vel.z);
@@ -799,9 +936,14 @@ static void camera_update(const Input *in, float dt) {
     float want = 4.4f;
     if (pl.st == PS_GLIDE || hs > RUN_SPEED + 2) want = 5.6f;
     if (pl.st == PS_WALLRUN) want = 6.5f;
+    want = lerpf(want, 2.3f, pl.aim);
     cam.dist = lerpf(cam.dist, want, clampf(3 * dt, 0, 1));
     vec3 tgt = v3add(pl.pos, v3(0, 1.45f, 0));
     if (pl.st == PS_WALLRUN) tgt = v3add(tgt, v3(0, 1.0f, 0));
+    {   /* shift over her right shoulder while aiming */
+        vec3 cr = v3(-cosf(cam.yaw), 0, sinf(cam.yaw));
+        tgt = v3add(tgt, v3add(v3scale(cr, 0.65f * pl.aim), v3(0, 0.15f * pl.aim, 0)));
+    }
     cam.target = v3lerp(cam.target, tgt, clampf(16 * dt, 0, 1));
     cam.fwd = v3(sinf(cam.yaw) * cosf(cam.pitch), -sinf(cam.pitch), cosf(cam.yaw) * cosf(cam.pitch));
     vec3 want_pos = v3sub(cam.target, v3scale(cam.fwd, cam.dist));
@@ -868,9 +1010,10 @@ static void combat_update(float dt) {
     PlayerInfo pi;
     pi.pos = pl.pos;
     pl.invuln = fmaxf(0, pl.invuln - dt);
-    pi.invulnerable = pl.invuln > 0 || (pl.st == PS_DODGE && pl.st_t < 0.38f) || pl.st == PS_LEDGE ||
+    pi.invulnerable = pl.invuln > 0 || pl.st == PS_DODGE || (pl.st == PS_ROLL && pl.st_t < 0.38f) || pl.st == PS_LEDGE ||
                       pl.st == PS_SLAM || pl.st == PS_WALLRUN;
     pi.hidden = pl.pos.y > 3.0f;
+    for (int c = 0; c < 4; c++) if (clouds[c].t > 0 && v3len(v3sub(clouds[c].p, pl.pos)) < 5.5f) pi.hidden = 1;
     int from;
     float dmg = enemies_update(&foes, &world, &pi, dt, &from);
     if (dmg > 0) {
@@ -890,6 +1033,7 @@ static void combat_update(float dt) {
     }
     pl.hurt_t = fmaxf(0, pl.hurt_t - dt);
     /* keep Neato from walking through guards */
+    bolts_update(dt);
     if (pl.st != PS_DODGE && pl.st != PS_ATTACK) {
         for (int i = 0; i < foes.n; i++) {
             Enemy *e = &foes.e[i];
@@ -971,7 +1115,7 @@ static const char *mission_objective(char *buf, int n) {
     case 0:
         if (mstep == 0) return "Hold R and sprint into a tall building to run up it";
         if (mstep == 1) { snprintf(buf, n, "Jump off and hold X to glide  (%d%%)", (int)(glide_time / 1.2f * 100)); return buf; }
-        return "In the air, press O to ground slam";
+        return "In the air, press O to smoke slam";
     case 1: return "Break the checkpoint south of the plaza";
     case 2: snprintf(buf, n, "Break checkpoints  %d/3", cleared); return buf;
     case 3: return "Clear a checkpoint before anyone spots you";
@@ -1034,7 +1178,7 @@ void game_update(const Input *in, float dt) {
     if (in->pressed & BTN_START) { gstate = GS_PAUSE; return; }
     game_time += dt;
     hint_t += dt;
-    pl.scan = approachf(pl.scan, (in->held & BTN_L) ? 1.0f : 0.0f, dt * 5);
+    pl.scan = approachf(pl.scan, pl.sense ? 1.0f : 0.0f, dt * 5);
     camera_update(in, dt);
     float sim = dt;
     if (hitstop > 0) { hitstop -= dt; sim = dt * 0.08f; }
@@ -1166,25 +1310,47 @@ void game_render(void) {
     /* 3D */
     vec3 shake = v3(0, 0, 0);
     if (cam.shake > 0) shake = v3scale(v3(rng_range(&fx_rng, -1, 1), rng_range(&fx_rng, -1, 1), rng_range(&fx_rng, -1, 1)), cam.shake * 0.25f);
-    float fov = 62.0f + clampf((sqrtf(pl.vel.x * pl.vel.x + pl.vel.z * pl.vel.z) - RUN_SPEED) * 0.8f, 0, 10);
+    float fov = 62.0f - 12.0f * pl.aim + clampf((sqrtf(pl.vel.x * pl.vel.x + pl.vel.z * pl.vel.z) - RUN_SPEED) * 0.8f, 0, 10);
     mat4 proj = m4perspective(DEG2RAD(fov), (float)SCREEN_W / SCREEN_H, 0.15f, FOG_END + 40);
     mat4 view = m4lookat(v3add(cam.pos, shake), v3add(cam.target, shake), v3(0, 1, 0));
     gfx_fog(FOG_RGB[0], FOG_RGB[1], FOG_RGB[2], FOG_START, FOG_END);
     world_draw(&world, &proj, &view, cam.pos, cam.fwd, FOG_END);
     enemies_draw(&foes, &proj, &view, cam.pos, FOG_END, pl.scan > 0.5f);
     draw_beacons(&proj, &view);
-    if (game_show_player) draw_hero(&proj, &view);
+    if (game_show_player && !(pl.st == PS_DODGE && pl.st_t > 0.03f && pl.st_t < 0.27f)) draw_hero(&proj, &view);
+    {   /* smoke bolt heads */
+        GVert bv[64]; uint16_t bi[96]; int nb = 0;
+        vec3 right = v3(view.m[0], view.m[4], view.m[8]), up = v3(view.m[1], view.m[5], view.m[9]);
+        for (int i = 0; i < 16; i++) {
+            if (bolts[i].life <= 0) continue;
+            vec3 p = bolts[i].p, r = v3scale(right, 0.45f), u = v3scale(up, 0.45f);
+            vec3 q[4] = {v3sub(v3sub(p, r), u), v3sub(v3add(p, r), u), v3add(v3add(p, r), u), v3add(v3sub(p, r), u)};
+            float uv[4][2] = {{0, 1}, {1, 1}, {1, 0}, {0, 0}};
+            for (int k = 0; k < 4; k++) bv[nb * 4 + k] = (GVert){q[k].x, q[k].y, q[k].z, uv[k][0], uv[k][1], MIST_COL};
+            uint16_t s0 = (uint16_t)(nb * 4);
+            uint16_t *ii = &bi[nb * 6];
+            ii[0] = s0; ii[1] = s0 + 1; ii[2] = s0 + 2; ii[3] = s0; ii[4] = s0 + 2; ii[5] = s0 + 3;
+            nb++;
+        }
+        if (nb) { gfx_set_matrices(&proj, &view); gfx_draw(bv, nb * 4, bi, nb * 6, tex_dot, GFX_ADDITIVE | GFX_NO_ZWRITE | GFX_NO_CULL); }
+    }
     fx_draw(&proj, &view);
 
     /* HUD */
     if (!game_show_hud) { gfx_end_frame(); return; }
     gfx_set_matrices(&ortho, &ident);
-    if (pl.scan > 0) hud_quad(0, 0, SCREEN_W, SCREEN_H, 0, 0, 0, 0, rgba32(20, 60, 110, (int)(70 * pl.scan)));
+    if (pl.scan > 0) hud_quad(0, 0, SCREEN_W, SCREEN_H, 0, 0, 0, 0, rgba32(40, 30, 70, (int)(80 * pl.scan)));
     if (pl.hurt_t > 0) hud_quad(0, 0, SCREEN_W, SCREEN_H, 0, 0, 0, 0, rgba32(200, 30, 30, (int)(160 * pl.hurt_t)));
     if (gstate == GS_INTRO || gstate == GS_PAUSE || gstate == GS_TITLE || gstate == GS_ENDING) hud_quad(0, 0, SCREEN_W, SCREEN_H, 0, 0, 0, 0, rgba32(6, 10, 18, 200));
     if (gstate == GS_PLAY || gstate == GS_PAUSE) {
         hud_bar(24, 24, 220, 10, pl.health / 100.0f, rgba32(230, 70, 90, 255));
-        hud_bar(24, 42, 220, 8, pl.charge / 100.0f, rgba32(110, 225, 255, 255));
+        hud_bar(24, 42, 220, 8, pl.charge / 100.0f, rgba32(180, 168, 225, 255));
+        if (pl.aim > 0.5f && gstate == GS_PLAY) {       /* reticle */
+            float cx = SCREEN_W / 2, cy = SCREEN_H / 2;
+            uint32_t rc = pl.charge >= BOLT_COST ? rgba32(235, 230, 255, 230) : rgba32(255, 90, 90, 200);
+            hud_quad(cx - 1, cy - 12, 2, 8, 0, 0, 0, 0, rc); hud_quad(cx - 1, cy + 4, 2, 8, 0, 0, 0, 0, rc);
+            hud_quad(cx - 12, cy - 1, 8, 2, 0, 0, 0, 0, rc); hud_quad(cx + 4, cy - 1, 8, 2, 0, 0, 0, 0, rc);
+        }
         draw_minimap();
     }
     if (pl.respawn_fade > 0) hud_quad(0, 0, SCREEN_W, SCREEN_H, 0, 0, 0, 0, rgba32(200, 230, 255, (int)(pl.respawn_fade * 255)));
@@ -1226,8 +1392,8 @@ void game_render(void) {
         hud_center(168, 1.1f, cyan, "SALTREACH  -  QUARANTINE ZONE 3");
         hud_center(225, 1.0f, w, "Six weeks after the flood, Vantage Security sealed the island.");
         hud_center(250, 1.0f, w, "No one gets out. No one asks why.");
-        hud_center(285, 1.0f, w, "Neato was on the pier the night the reactor barge went up.");
-        hud_center(310, 1.0f, w, "Now every fall, every hit, every impact makes her stronger.");
+        hud_center(285, 1.0f, w, "Neato was on the pier the night the reactor barge burned.");
+        hud_center(310, 1.0f, w, "She breathed in the black smoke. Now she can become it.");
         hud_center(350, 1.0f, cyan, "Break the Vantage checkpoints. Find out what they're hiding.");
         if (((int)(game_time * 2)) % 2) hud_center(430, 1.0f, rgba32(255, 255, 255, 200), "Press X to begin");
         hud_flush(tex_font);
@@ -1235,7 +1401,7 @@ void game_render(void) {
         return;
     }
     hud_text(252, 18, 1, rgba32(255, 255, 255, 230), "NEATO");
-    hud_text(252, 36, 0.8f, rgba32(150, 230, 255, 230), "KINETIC");
+    hud_text(252, 36, 0.8f, rgba32(196, 186, 236, 230), "MIST");
     /* objective */
     if (mission < NUM_MISSIONS) {
         snprintf(buf, sizeof buf, "%d. %s", mission + 1, MISSIONS[mission].title);
@@ -1268,24 +1434,25 @@ void game_render(void) {
     }
     const char *sn = state_name();
     if (*sn) hud_center(SCREEN_H - 60, 1, rgba32(150, 230, 255, 220), sn);
-    if (pl.scan > 0.5f && gstate == GS_PLAY) hud_center(SCREEN_H - 84, 0.9f, rgba32(150, 210, 255, 220), "KINETIC SENSE");
+    if (pl.scan > 0.5f && gstate == GS_PLAY) hud_center(SCREEN_H - 84, 0.9f, rgba32(196, 186, 236, 220), "MIST SENSE");
     if (hint_t < 14 && gstate == GS_PLAY) {
         uint32_t c = rgba32(255, 255, 255, (int)(230 * clampf(14 - hint_t, 0, 1)));
-        hud_text(24, SCREEN_H - 138, 0.85f, c, "X jump / hold in air: glide");
-        hud_text(24, SCREEN_H - 121, 0.85f, c, "R sprint - into a wall: wall run");
-        hud_text(24, SCREEN_H - 104, 0.85f, c, "O dodge / in air: ground slam");
-        hud_text(24, SCREEN_H - 87, 0.85f, c, "[] strike   /\\ counter or kinetic blast");
-        hud_text(24, SCREEN_H - 70, 0.85f, c, "L kinetic sense (see guards through walls)");
+        hud_text(24, SCREEN_H - 155, 0.85f, c, "X jump / hold in air: mist glide");
+        hud_text(24, SCREEN_H - 138, 0.85f, c, "R sprint - into a wall: wall run");
+        hud_text(24, SCREEN_H - 121, 0.85f, c, "O mist dash / in air: smoke slam");
+        hud_text(24, SCREEN_H - 104, 0.85f, c, "[] strike   /\\ counter or smoke bomb");
+        hud_text(24, SCREEN_H - 87, 0.85f, c, "hold L aim, R fire smoke bolts");
+        hud_text(24, SCREEN_H - 70, 0.85f, c, "Up: mist sense (see guards through walls)");
     }
     if (gstate == GS_PAUSE) {
         hud_center(120, 2.0f, rgba32(255, 255, 255, 255), "PAUSED");
         static const char *lines[] = {
             "Left stick - move        Right stick - camera",
-            "X - jump, hold in the air to glide, X on a wall to kick off",
-            "R - sprint. Sprint into a building to run up it",
-            "[] - strike (chains between guards)   O - dodge / ground slam",
-            "/\\ - counter when a guard flashes, otherwise kinetic blast",
-            "L - kinetic sense     Unaware guard from behind or above: takedown",
+            "X - jump, hold in the air to mist glide, X on a wall to kick off",
+            "R - sprint into a building to run up it.  Hold L to aim, R fires",
+            "[] - strike (chains between guards)   O - mist dash / smoke slam",
+            "/\\ - counter when a guard flashes, otherwise smoke bomb",
+            "Up - mist sense    Behind, above or in smoke: silent takedown",
             "",
             "Start / O - resume       Start + Select - quit",
         };

@@ -20,7 +20,7 @@ static const float CHECKPOINTS[][2] = {
 };
 
 int enemy_alive(const Enemy *e) { return e->st != E_DOWN && !(e->st == E_KNOCK && e->hp <= 0); }
-int enemy_aware(const Enemies *es, int i) { return es->group_alert[es->e[i].group]; }
+int enemy_aware(const Enemies *es, int i) { return es->group_alert[es->e[i].group] && es->e[i].blind <= 0; }
 
 static int count_group(const Enemies *es, int g) {
     int n = 0;
@@ -183,6 +183,24 @@ float enemies_update(Enemies *es, const World *w, const PlayerInfo *pi, float dt
         e->t += dt;
         e->flash = fmaxf(0, e->flash - dt);
         if (e->st == E_DOWN) continue;
+        if (e->blind > 0) {
+            /* coughing and stumbling in the smoke */
+            e->blind -= dt;
+            if (e->st != E_KNOCK && e->st != E_STAGGER) {
+                if (e->st == E_WINDUP || e->st == E_ATTACK) { e->st = E_CIRCLE; e->t = 0; }
+                e->look_t -= dt;
+                if (e->look_t < 0) { e->look_t = rng_range(&erng, 0.6f, 1.4f); e->circle_ang = rng_range(&erng, 0, 6.28f); }
+                vec3 wp = v3add(e->pos, v3(cosf(e->circle_ang), 0, sinf(e->circle_ang)));
+                move_towards(e, wp, 0.9f, dt);
+                face(e, wp, 2, dt);
+                e->cooldown = fmaxf(e->cooldown, 1.0f);
+                e->pos.x += e->vel.x * dt; e->pos.z += e->vel.z * dt;
+                world_push_circle(w, &e->pos, GUARD_R, e->pos.y + 0.3f, e->pos.y + 1.8f);
+                float hs = sqrtf(e->vel.x * e->vel.x + e->vel.z * e->vel.z);
+                e->phase += dt * hs / 1.6f * 6.2832f;
+                continue;
+            }
+        }
         vec3 to_p = v3sub(pi->pos, e->pos); to_p.y = 0;
         float dist = v3len(to_p);
         float home_d = v3len(v3sub(pi->pos, es->group_pos[e->group]));
@@ -414,6 +432,10 @@ static void guard_pose(const Enemy *e, GPose *p) {
 
 static void build_guard(const Enemy *e) {
     GPose p; guard_pose(e, &p);
+    if (e->blind > 0 && e->st != E_KNOCK && e->st != E_DOWN) {   /* doubled over, arm over the visor */
+        float c = 0.15f * sinf(e->t * 14);
+        p.lean = 0.55f + c; p.arm[0] = 1.9f; p.elbow[0] = 2.0f; p.raise[0] = -0.1f;
+    }
     float sc = e->heavy == 2 ? 1.55f : e->heavy ? 1.18f : 1.0f;
     uint32_t armor = e->heavy == 2 ? rgba32(150, 40, 36, 255) : e->heavy ? rgba32(70, 60, 58, 255) : rgba32(52, 62, 82, 255);
     uint32_t suit = rgba32(38, 40, 46, 255), pad = rgba32(120, 128, 140, 255);
@@ -496,6 +518,16 @@ void enemies_draw(Enemies *es, const mat4 *proj, const mat4 *view, vec3 cam, flo
         gi[gni++] = s; gi[gni++] = s + 1; gi[gni++] = s + 2; gi[gni++] = s; gi[gni++] = s + 2; gi[gni++] = s + 3;
     }
     if (gni) gfx_draw(gv, gnv, gi, gni, es->tex_dot, GFX_ADDITIVE | GFX_NO_ZWRITE | GFX_NO_ZTEST | GFX_NO_CULL | GFX_NO_FOG);
+}
+
+int enemies_blind(Enemies *es, vec3 c, float radius, float time) {
+    int n = 0;
+    for (int i = 0; i < es->n; i++) {
+        Enemy *e = &es->e[i];
+        if (!enemy_alive(e) || !es->group_active[e->group]) continue;
+        if (v3len(v3sub(e->pos, c)) < radius) { e->blind = time; n++; }
+    }
+    return n;
 }
 
 /* silent stealth takedown: the guard drops without alerting the group */

@@ -84,7 +84,14 @@ static void pose_of(const Animator *a, AnimParams *p) {
         p->bob = 0.06f * fabsf(c) - 0.06f;
     } break;
     case ANIM_JUMP: {
-        float k = smooth01(t / 0.25f);
+        if (t < 0.07f) {                       /* quick crouch as she pushes off */
+            float c = sinf(t / 0.07f * 3.1416f);
+            p->thigh_l = p->thigh_r = 0.6f * c; p->shin_l = p->shin_r = 1.0f * c;
+            p->foot_l = p->foot_r = -0.4f * c; p->lean = 0.3f * c; p->bob = -0.15f * c;
+            p->arm_l = p->arm_r = -0.5f * c;
+            break;
+        }
+        float k = smooth01((t - 0.07f) / 0.22f);
         p->lean = 0.1f;
         p->thigh_l = 0.9f * k; p->shin_l = 1.4f * k;
         p->thigh_r = -0.2f * k; p->shin_r = 0.6f * k;
@@ -206,6 +213,44 @@ static void pose_of(const Animator *a, AnimParams *p) {
         p->raise_l = p->raise_r = ARM_REST + 0.5f * k;
         p->arm_l = p->arm_r = -0.4f * k;
         p->shin_l = p->shin_r = 0.4f * k;
+    } break;
+    case ANIM_AIM: {
+        /* right arm out towards the reticle, left hand guarding; legs walk if moving */
+        float amp = clampf(a->speed / 4.0f, 0, 1);
+        p->arm_r = 1.45f; p->fore_r = 0.05f; p->raise_r = ARM_REST + 0.3f;
+        p->arm_l = 0.6f; p->fore_l = 1.7f; p->raise_l = ARM_REST + 0.2f;
+        p->twist = 0.25f; p->lean = 0.05f;
+        p->thigh_l = 0.45f * s * amp + 0.1f; p->thigh_r = -0.45f * s * amp - 0.1f;
+        p->shin_l = 0.2f + 0.5f * (0.5f - 0.5f * c) * amp; p->shin_r = 0.2f + 0.5f * (0.5f + 0.5f * c) * amp;
+        p->bob = -0.03f - 0.02f * fabsf(c) * amp;
+    } break;
+    case ANIM_SKID: {
+        /* braking hard: lean back, feet planted ahead, arms out for balance */
+        float k = smooth01(t / 0.08f) * (1.0f - smooth01((t - 0.2f) / 0.15f));
+        p->lean = -0.35f * k; p->head = 0.15f * k;
+        p->thigh_l = 0.75f * k; p->shin_l = 0.35f * k; p->foot_l = 0.3f * k;
+        p->thigh_r = 0.2f * k; p->shin_r = 0.9f * k;
+        p->bob = -0.18f * k;
+        p->raise_l = p->raise_r = ARM_REST + 0.7f * k;
+        p->arm_l = p->arm_r = 0.3f * k; p->fore_l = p->fore_r = 0.6f;
+    } break;
+    case ANIM_LAND_SOFT: {
+        float k = sinf(clampf(t / 0.2f, 0, 1) * 3.1416f);
+        p->lean = 0.2f * k;
+        p->thigh_l = p->thigh_r = 0.4f * k; p->shin_l = p->shin_r = 0.8f * k;
+        p->foot_l = p->foot_r = -0.3f * k;
+        p->bob = -0.16f * k;
+        p->raise_l = p->raise_r = ARM_REST + 0.3f * k;
+    } break;
+    case ANIM_THROW: {
+        /* overhand toss of a smoke bomb */
+        float k = t < 0.12f ? smooth01(t / 0.12f) : 1.0f - smooth01((t - 0.12f) / 0.25f);
+        float wind = 1.0f - smooth01(t / 0.12f);
+        p->arm_r = -1.8f * wind + 2.0f * (1 - wind) * k; p->fore_r = 0.9f * wind + 0.2f;
+        p->raise_r = ARM_REST + 0.4f;
+        p->twist = 0.4f * wind - 0.3f * k; p->lean = 0.25f * k;
+        p->thigh_l = 0.45f; p->shin_l = 0.3f; p->thigh_r = -0.3f; p->shin_r = 0.35f;
+        p->arm_l = 0.5f; p->fore_l = 1.2f;
     } break;
     default: break;
     }

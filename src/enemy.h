@@ -17,6 +17,7 @@ typedef struct {
     float phase, flash, cooldown, circle_ang, look_t;
     vec3 knock;
     float knock_y, roll;
+    float blind;        /* choking in smoke: can't see or attack */
 } Enemy;
 
 #define MAX_ENEMIES 48
@@ -55,6 +56,8 @@ int   enemy_aware(const Enemies *es, int i);
 int   enemy_hit(Enemies *es, int i, int dmg, vec3 from, float knock, float lift);
 void  enemies_alert_group(Enemies *es, int group);
 void  enemy_takedown(Enemies *es, int i);
+/* smoke bomb: blind every guard within radius for 'time' seconds */
+int   enemies_blind(Enemies *es, vec3 c, float radius, float time);
 int   enemies_groups_cleared(const Enemies *es);
 int   enemies_attackers(const Enemies *es);
 void  enemies_activate(Enemies *es, int group);
