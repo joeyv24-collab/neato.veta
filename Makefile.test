@@ -11,6 +11,7 @@ neato_test: $(SRC) src/*.h
 assets:
 	python3 tools/fbx2nmdl.py assets_src/neato.fbx assets/neato.nmdl --height 1.75
 	for f in assets_src/*.png; do python3 tools/fbx2nmdl.py --tex $$f assets/$$(basename $$f .png).ntex; done
+	python3 tools/tattoos.py assets_src/neato_body.png assets/neato.nmdl assets/neato_body.ntex
 	python3 tools/make_font.py assets/font.ntex && rm -f assets/font_preview.png
 
 .PHONY: assets

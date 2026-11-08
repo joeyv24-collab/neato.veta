@@ -55,5 +55,6 @@ mkdir build && cd build && cmake .. && make
   - `model.c` / `anim.c`: skinned model loading and code-driven animation
   - `gfx_gl.c`: vitaGL renderer · `gfx_soft.c`: software renderer for desktop tests
 - `assets_src/`: original model and textures · `assets/`: converted game files
+- `tools/tattoos.py`: paints Neato's tattoos (decals in `assets_src/tattoo_*.json`) onto her body texture
 - `tools/fbx2nmdl.py`: converts the FBX model and PNG textures (`make -f Makefile.test assets`)
 - `tests/`: desktop test harness: `make -f Makefile.test && ./neato_test`

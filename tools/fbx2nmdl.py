@@ -205,8 +205,33 @@ def convert(path, out, height):
     G = np.diag([s, s, s, 1.0])
     G[:3, 3] = [-(lo[0] + hi[0]) / 2 * s, -lo[1] * s, -(lo[2] + hi[2]) / 2 * s]
 
+    # The body UVs are mirrored (both halves of the body share texels), which
+    # would put a one-sided detail like a tattoo on both sides.  The body
+    # texture is therefore twice as tall: the top half is used by the
+    # character's left side and centre, the bottom half (a copy) by her right
+    # side (-X), so each side can be painted separately (tools/tattoos.py).
+    gx = [(G @ np.array([*v[0], 1]))[0] for v in verts]
+    remap, final = {}, []        # (vert, mode) -> new index; mode raw/top/bot
+    def use(vi, mode):
+        k = (vi, mode)
+        if k not in remap:
+            remap[k] = len(final)
+            final.append(k)
+        return remap[k]
+    for slot, tris in tris_by_slot.items():
+        for ti, t in enumerate(tris):
+            if slot == SLOTS['body']:
+                mode = 'bot' if sum(gx[i] for i in t) / 3 < -1e-3 else 'top'
+            else:
+                mode = 'raw'
+            tris[ti] = tuple(use(i, mode) for i in t)
+
     out_v = bytearray()
-    for p, n, uv, w in verts:
+    for vi, mode in final:
+        p, n, uv, w = verts[vi]
+        v = 1.0 - uv[1]
+        if mode != 'raw':
+            v = v * 0.5 + (0.5 if mode == 'bot' else 0.0)
         gp = (G @ np.array([*p, 1]))[:3]
         top4 = sorted(w.items(), key=lambda kv: -kv[1])[:4]
         tot = sum(x[1] for x in top4)
@@ -215,7 +240,7 @@ def convert(path, out, height):
         bi = [b for b, _ in top4] + [0] * (4 - len(top4))
         bw = [int(round(x / tot * 255)) for _, x in top4] + [0] * (4 - len(top4))
         bw[0] += 255 - sum(bw)
-        out_v += struct.pack('<8f4B4B', *gp, *n, uv[0], 1.0 - uv[1], *bi, *bw)
+        out_v += struct.pack('<8f4B4B', *gp, *n, uv[0], v, *bi, *bw)
 
     subs, idx = [], []
     for slot, tris in tris_by_slot.items():
@@ -236,13 +261,13 @@ def convert(path, out, height):
         out_b += struct.pack('<16f', *np.linalg.inv(Bg).T.flatten())
 
     with open(out, 'wb') as f:
-        f.write(b'NMDL' + struct.pack('<IIIIIf', 1, len(verts), len(idx), len(subs), len(ordered), height))
+        f.write(b'NMDL' + struct.pack('<IIIIIf', 1, len(final), len(idx), len(subs), len(ordered), height))
         f.write(out_b)
         f.write(out_v)
         for s_ in subs:
             f.write(struct.pack('<III', *s_))
         f.write(struct.pack('<%dH' % len(idx), *idx))
-    print(f'{out}: {len(verts)} verts, {len(idx)//3} tris, {len(subs)} submeshes, {len(ordered)} bones')
+    print(f'{out}: {len(final)} verts, {len(idx)//3} tris, {len(subs)} submeshes, {len(ordered)} bones')
     for b in ordered:
         print('  ', bidx[b], b, '<-', def_parent(b))
 
