@@ -4,6 +4,7 @@
 #include <psp2/touch.h>
 #include <psp2/power.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/io/stat.h>
 #include "platform.h"
 
 /* larger newlib heap for assets and dynamic buffers */
@@ -78,4 +79,16 @@ void *plat_load(const char *name, int *size) {
     fclose(f);
     if (size) *size = (int)n;
     return d;
+}
+
+#define SAVE_DIR  "ux0:data/neato"
+#define SAVE_FILE SAVE_DIR "/save.bin"
+int plat_save_write(const void *data, int size) {
+    sceIoMkdir(SAVE_DIR, 0777);
+    FILE *f = fopen(SAVE_FILE, "wb"); if (!f) return 0;
+    int ok = fwrite(data, 1, size, f) == (size_t)size; fclose(f); return ok;
+}
+int plat_save_read(void *data, int size) {
+    FILE *f = fopen(SAVE_FILE, "rb"); if (!f) return 0;
+    int ok = fread(data, 1, size, f) == (size_t)size; fclose(f); return ok;
 }

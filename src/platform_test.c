@@ -35,3 +35,13 @@ void *plat_load(const char *name, int *size) {
     if (size) *size = (int)n;
     return d;
 }
+
+static const char *save_path(void) { const char *p = getenv("NEATO_SAVE"); return p ? p : "/tmp/neato_save.bin"; }
+int plat_save_write(const void *data, int size) {
+    FILE *f = fopen(save_path(), "wb"); if (!f) return 0;
+    int ok = fwrite(data, 1, size, f) == (size_t)size; fclose(f); return ok;
+}
+int plat_save_read(void *data, int size) {
+    FILE *f = fopen(save_path(), "rb"); if (!f) return 0;
+    int ok = fread(data, 1, size, f) == (size_t)size; fclose(f); return ok;
+}

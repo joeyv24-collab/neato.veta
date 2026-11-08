@@ -28,6 +28,8 @@ typedef struct {
     vec3 group_pos[MAX_GROUPS];
     int group_alert[MAX_GROUPS];
     int group_left[MAX_GROUPS];      /* guards still standing */
+    int group_active[MAX_GROUPS];    /* the HQ group only appears for the final mission */
+    int group_spotted[MAX_GROUPS];   /* was this group ever alerted */
     int tex_white, tex_dot;
 } Enemies;
 
@@ -55,5 +57,11 @@ void  enemies_alert_group(Enemies *es, int group);
 void  enemy_takedown(Enemies *es, int i);
 int   enemies_groups_cleared(const Enemies *es);
 int   enemies_attackers(const Enemies *es);
+void  enemies_activate(Enemies *es, int group);
+void  enemies_clear_group(Enemies *es, int group);   /* used when loading a save */
+int   enemies_boss(const Enemies *es);               /* index of the boss, -1 if none */
+
+#define NUM_CHECKPOINTS 6
+#define HQ_GROUP        6
 
 #endif

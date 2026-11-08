@@ -73,8 +73,24 @@ static float fps_acc; static int fps_frames, fps_show;
 static unsigned fx_rng = 777;
 int game_show_hud = 1, game_show_player = 1;   /* toggled by the test harness */
 static Enemies foes;
-typedef enum { GS_INTRO, GS_PLAY, GS_PAUSE } GState;
-static GState gstate = GS_INTRO;
+typedef enum { GS_TITLE, GS_INTRO, GS_PLAY, GS_PAUSE, GS_ENDING } GState;
+static GState gstate = GS_TITLE;
+
+/* ---- story missions ---- */
+typedef struct { const char *title, *brief; } MissionDef;
+static const MissionDef MISSIONS[] = {
+    {"Rooftops",     "Test your new body: run up a tower, glide, then slam down."},
+    {"First Strike", "Break the Vantage checkpoint south of the plaza."},
+    {"Making Noise", "Break two more checkpoints. Let Vantage know you're here."},
+    {"Ghost",        "Break a checkpoint without being spotted. Hold L, strike from behind or above."},
+    {"Lockdown",     "Break every Vantage checkpoint in Zone 3."},
+    {"The Warden",   "Storm Vantage field HQ in the southeast and take down the Warden."},
+};
+#define NUM_MISSIONS ((int)(sizeof MISSIONS / sizeof MISSIONS[0]))
+static int mission, mstep, menu_sel, has_save, slam_done;
+static float mission_card_t, mission_done_t, glide_time;
+
+typedef struct { char magic[4]; int version, mission, cleared_mask, best_chain, takedowns; float charge; } SaveData;
 static float banner_t; static char banner[64];
 static float dead_t;
 int game_skip_intro = 0;
@@ -287,6 +303,7 @@ static void land(void) {
         float power = 1.0f + pl.charge / 50.0f;
         fx_shockwave(pl.pos, power);
         slam_damage(power);
+        slam_done = 1;
         cam.shake = 0.6f;
         pl.charge = clampf(pl.charge - 30, 0, 100);
         pl.vel.x = pl.vel.z = 0;
@@ -323,7 +340,7 @@ static void show_banner(const char *t) {
 static void check_cleared(int before) {
     int now = enemies_groups_cleared(&foes);
     if (now > before) {
-        if (now >= foes.ngroups) show_banner("ZONE 3 LIBERATED");
+        if (now >= NUM_CHECKPOINTS) show_banner("ZONE 3 CHECKPOINTS DOWN");
         else show_banner("CHECKPOINT BROKEN");
     }
 }
@@ -742,7 +759,7 @@ int game_init(void) {
     memset(&pl, 0, sizeof pl);
     anim_init(&pl.anim);
     player_spawn(world.spawn);
-    pl.yaw = (float)M_PI;            /* face away from the monument */
+    pl.yaw = 0;                      /* face north, away from the monument */
     pl.health = 100; pl.charge = 20;
     pl.pivot = 0.9f;
     pl.blink_t = 2;
@@ -751,7 +768,10 @@ int game_init(void) {
     cam.fwd = v3(0, 0, -1);
     pl.target = -1;
     enemies_init(&foes, &world, 913);
-    gstate = game_skip_intro ? GS_PLAY : GS_INTRO;
+    gstate = game_skip_intro ? GS_PLAY : GS_TITLE;
+    { SaveData sd; has_save = plat_save_read(&sd, sizeof sd) && !memcmp(sd.magic, "NEAT", 4) && sd.version == 1; }
+    menu_sel = has_save ? 0 : 1;
+    mission_card_t = game_skip_intro ? 4.0f : 0;
     return 1;
 }
 
@@ -806,7 +826,122 @@ static void combat_update(float dt) {
     banner_t = fmaxf(0, banner_t - dt);
 }
 
+static void save_game(void) {
+    SaveData sd; memset(&sd, 0, sizeof sd);
+    memcpy(sd.magic, "NEAT", 4); sd.version = 1;
+    sd.mission = mission;
+    for (int g = 0; g < foes.ngroups; g++) if (foes.group_left[g] == 0) sd.cleared_mask |= 1 << g;
+    sd.best_chain = pl.best_chain; sd.takedowns = pl.takedowns; sd.charge = pl.charge;
+    has_save = plat_save_write(&sd, sizeof sd);
+}
+
+static void load_game(void) {
+    SaveData sd;
+    if (!plat_save_read(&sd, sizeof sd) || memcmp(sd.magic, "NEAT", 4)) return;
+    mission = sd.mission < 0 ? 0 : (sd.mission > NUM_MISSIONS ? NUM_MISSIONS : sd.mission);
+    for (int g = 0; g < foes.ngroups; g++) if (sd.cleared_mask & (1 << g)) enemies_clear_group(&foes, g);
+    pl.best_chain = sd.best_chain; pl.takedowns = sd.takedowns; pl.charge = sd.charge;
+    if (mission == NUM_MISSIONS - 1 || (mission >= NUM_MISSIONS && !(sd.cleared_mask & (1 << HQ_GROUP))))
+        enemies_activate(&foes, HQ_GROUP);
+}
+
+static void start_mission(int m) {
+    mission = m; mstep = 0; glide_time = 0; slam_done = 0;
+    mission_card_t = 4.0f;
+    if (m == NUM_MISSIONS - 1) enemies_activate(&foes, HQ_GROUP);
+}
+
+/* where the objective marker should point; returns 0 if none */
+static int mission_waypoint(vec3 *out) {
+    if (mission == 1 && foes.group_left[0]) { *out = foes.group_pos[0]; return 1; }
+    if (mission == NUM_MISSIONS - 1) { *out = foes.group_pos[HQ_GROUP]; return 1; }
+    if (mission >= 1 && mission < NUM_MISSIONS - 1) {
+        float best = 1e9f; int found = 0;
+        for (int g = 0; g < NUM_CHECKPOINTS; g++) {
+            if (!foes.group_left[g]) continue;
+            float d = v3len(v3sub(foes.group_pos[g], pl.pos));
+            if (d < best) { best = d; *out = foes.group_pos[g]; found = 1; }
+        }
+        return found;
+    }
+    return 0;
+}
+
+static int mission_complete(float dt) {
+    int cleared = enemies_groups_cleared(&foes);
+    switch (mission) {
+    case 0:
+        if (mstep == 0 && pl.pos.y > 25 && pl.grounded) mstep = 1;
+        if (mstep == 1) { if (pl.st == PS_GLIDE) glide_time += dt; if (glide_time > 1.2f) { mstep = 2; slam_done = 0; } }
+        return mstep == 2 && slam_done;
+    case 1: return foes.group_left[0] == 0;
+    case 2: return cleared >= 3;
+    case 3:
+        for (int g = 0; g < NUM_CHECKPOINTS; g++) if (foes.group_left[g] == 0 && !foes.group_spotted[g]) return 1;
+        return cleared >= NUM_CHECKPOINTS;
+    case 4: return cleared >= NUM_CHECKPOINTS;
+    case 5: return foes.group_left[HQ_GROUP] == 0;
+    }
+    return 0;
+}
+
+static const char *mission_objective(char *buf, int n) {
+    int cleared = enemies_groups_cleared(&foes);
+    switch (mission) {
+    case 0:
+        if (mstep == 0) return "Hold R and sprint into a tall building to run up it";
+        if (mstep == 1) { snprintf(buf, n, "Jump off and hold X to glide  (%d%%)", (int)(glide_time / 1.2f * 100)); return buf; }
+        return "In the air, press O to ground slam";
+    case 1: return "Break the checkpoint south of the plaza";
+    case 2: snprintf(buf, n, "Break checkpoints  %d/3", cleared); return buf;
+    case 3: return "Clear a checkpoint before anyone spots you";
+    case 4: snprintf(buf, n, "Break every checkpoint  %d/%d", cleared, NUM_CHECKPOINTS); return buf;
+    case 5: {
+        int b = enemies_boss(&foes);
+        if (b >= 0 && enemy_alive(&foes.e[b])) { snprintf(buf, n, "Take down the Warden  (%d)", foes.e[b].hp > 0 ? foes.e[b].hp : 0); return buf; }
+        return "Clear Vantage HQ";
+    }
+    }
+    return "Free roam: Saltreach Zone 3 is yours";
+}
+
+static void mission_update(float dt) {
+    mission_card_t = fmaxf(0, mission_card_t - dt);
+    if (mission >= NUM_MISSIONS) return;
+    if (mission_done_t > 0) {
+        mission_done_t -= dt;
+        if (mission_done_t <= 0) {
+            if (mission + 1 >= NUM_MISSIONS) { mission = NUM_MISSIONS; save_game(); gstate = GS_ENDING; }
+            else { start_mission(mission + 1); save_game(); }
+        }
+        return;
+    }
+    if (mission_complete(dt)) {
+        show_banner("MISSION COMPLETE");
+        mission_done_t = 2.5f;
+    }
+}
+
 void game_update(const Input *in, float dt) {
+    if (gstate == GS_TITLE) {
+        game_time += dt;
+        if (in->pressed & (BTN_UP | BTN_DOWN)) menu_sel = has_save ? !menu_sel : 1;
+        if (in->ly < -0.6f && has_save) menu_sel = 0;
+        if (in->ly > 0.6f) menu_sel = 1;
+        if (in->pressed & BTN_CROSS) {
+            if (menu_sel == 0 && has_save) {
+                load_game();
+                gstate = mission >= NUM_MISSIONS ? GS_PLAY : GS_PLAY;
+                if (mission < NUM_MISSIONS) mission_card_t = 4.0f;
+            } else { start_mission(0); gstate = GS_INTRO; game_time = 0; }
+        }
+        return;
+    }
+    if (gstate == GS_ENDING) {
+        game_time += dt;
+        if (in->pressed & BTN_CROSS) gstate = GS_PLAY;
+        return;
+    }
     if (gstate == GS_INTRO) {
         game_time += dt;
         if (in->pressed & (BTN_CROSS | BTN_START)) gstate = GS_PLAY;
@@ -823,6 +958,7 @@ void game_update(const Input *in, float dt) {
     camera_update(in, dt);
     player_update(in, dt);
     combat_update(dt);
+    mission_update(dt);
     fx_update(dt);
 }
 
@@ -832,7 +968,7 @@ static void draw_beacons(const mat4 *proj, const mat4 *view) {
     vec3 right = v3(view->m[0], 0, view->m[8]);
     right = v3norm(right);
     for (int g = 0; g < foes.ngroups; g++) {
-        if (foes.group_left[g] == 0) continue;
+        if (foes.group_left[g] == 0 || !foes.group_active[g] || mission == 0) continue;
         vec3 p = foes.group_pos[g];
         float d = v3len(v3sub(p, pl.pos));
         if (d < 12) continue;
@@ -869,14 +1005,14 @@ static void draw_minimap(void) {
     }
     for (int i = 0; i < foes.n; i++) {
         const Enemy *e = &foes.e[i];
-        if (!enemy_alive(e)) continue;
+        if (!enemy_alive(e) || !foes.group_active[e->group]) continue;
         float ox, oy; MAP(e->pos.x, e->pos.z, ox, oy);
         if (fabsf(ox - cx) > R || fabsf(oy - cy) > R) continue;
         uint32_t col = enemy_aware(&foes, i) ? rgba32(255, 70, 60, 255) : rgba32(255, 170, 60, 255);
         hud_quad(ox - 2.5f, oy - 2.5f, 5, 5, 0, 0, 0, 0, col);
     }
     for (int g = 0; g < foes.ngroups; g++) {        /* checkpoint markers clamp to the edge */
-        if (foes.group_left[g] == 0) continue;
+        if (foes.group_left[g] == 0 || !foes.group_active[g]) continue;
         float ox, oy; MAP(foes.group_pos[g].x, foes.group_pos[g].z, ox, oy);
         float dx = ox - cx, dy = oy - cy, l = sqrtf(dx * dx + dy * dy);
         if (l > R - 6) { ox = cx + dx / l * (R - 6); oy = cy + dy / l * (R - 6); }
@@ -928,6 +1064,7 @@ static void draw_hero(const mat4 *proj, const mat4 *view) {
 static const char *state_name(void) {
     static const char *n[] = {"", "", "GLIDE", "WALL RUN", "", "SLAM", "", "", ""};
     if (gstate != GS_PLAY) return "";
+    if (mission == 0) return "";
     return n[pl.st];
 }
 
@@ -962,8 +1099,8 @@ void game_render(void) {
     gfx_set_matrices(&ortho, &ident);
     if (pl.scan > 0) hud_quad(0, 0, SCREEN_W, SCREEN_H, 0, 0, 0, 0, rgba32(20, 60, 110, (int)(70 * pl.scan)));
     if (pl.hurt_t > 0) hud_quad(0, 0, SCREEN_W, SCREEN_H, 0, 0, 0, 0, rgba32(200, 30, 30, (int)(160 * pl.hurt_t)));
-    if (gstate == GS_INTRO || gstate == GS_PAUSE) hud_quad(0, 0, SCREEN_W, SCREEN_H, 0, 0, 0, 0, rgba32(6, 10, 18, 200));
-    if (gstate != GS_INTRO) {
+    if (gstate == GS_INTRO || gstate == GS_PAUSE || gstate == GS_TITLE || gstate == GS_ENDING) hud_quad(0, 0, SCREEN_W, SCREEN_H, 0, 0, 0, 0, rgba32(6, 10, 18, 200));
+    if (gstate == GS_PLAY || gstate == GS_PAUSE) {
         hud_bar(24, 24, 220, 10, pl.health / 100.0f, rgba32(230, 70, 90, 255));
         hud_bar(24, 42, 220, 8, pl.charge / 100.0f, rgba32(110, 225, 255, 255));
         draw_minimap();
@@ -972,6 +1109,34 @@ void game_render(void) {
     hud_flush(world.tex_white);
 
     char buf[96];
+    if (gstate == GS_TITLE) {
+        hud_center(120, 3.2f, rgba32(255, 255, 255, 255), "NEATO");
+        hud_center(192, 1.2f, rgba32(140, 230, 255, 255), "SALTREACH");
+        const char *opts[2] = {"Continue", "New Game"};
+        for (int i = 0; i < 2; i++) {
+            int on = menu_sel == i;
+            uint32_t c = i == 0 && !has_save ? rgba32(120, 120, 130, 160) : on ? rgba32(255, 210, 80, 255) : rgba32(230, 235, 245, 220);
+            snprintf(buf, sizeof buf, on ? "> %s <" : "%s", opts[i]);
+            hud_center(300 + i * 40, 1.3f, c, buf);
+        }
+        hud_center(470, 0.8f, rgba32(255, 255, 255, 140), "v1.0 dev  -  X select");
+        hud_flush(tex_font);
+        gfx_end_frame();
+        return;
+    }
+    if (gstate == GS_ENDING) {
+        hud_center(110, 2.0f, rgba32(255, 255, 255, 255), "ZONE 3 IS FREE");
+        hud_center(180, 1.0f, rgba32(230, 235, 245, 230), "The Warden is down and Vantage's checkpoints are scrap.");
+        hud_center(206, 1.0f, rgba32(230, 235, 245, 230), "In his tablet: shipping logs for the reactor barge,");
+        hud_center(232, 1.0f, rgba32(230, 235, 245, 230), "and a second quarantine zone nobody was told about.");
+        hud_center(272, 1.0f, rgba32(140, 230, 255, 240), "Neato's story continues.");
+        snprintf(buf, sizeof buf, "Best combo x%d     Takedowns %d", pl.best_chain, pl.takedowns);
+        hud_center(330, 1.0f, rgba32(255, 210, 80, 240), buf);
+        hud_center(400, 0.9f, rgba32(255, 255, 255, 200), "Thanks for playing.  X - keep exploring");
+        hud_flush(tex_font);
+        gfx_end_frame();
+        return;
+    }
     if (gstate == GS_INTRO) {
         float a = clampf(game_time * 0.8f, 0, 1);
         uint32_t w = rgba32(255, 255, 255, (int)(255 * a)), cyan = rgba32(140, 230, 255, (int)(255 * a));
@@ -990,16 +1155,24 @@ void game_render(void) {
     hud_text(252, 18, 1, rgba32(255, 255, 255, 230), "NEATO");
     hud_text(252, 36, 0.8f, rgba32(150, 230, 255, 230), "KINETIC");
     /* objective */
-    int cleared = enemies_groups_cleared(&foes);
-    if (cleared < foes.ngroups) {
-        snprintf(buf, sizeof buf, "Break the Vantage checkpoints  %d/%d", cleared, foes.ngroups);
+    if (mission < NUM_MISSIONS) {
+        snprintf(buf, sizeof buf, "%d. %s", mission + 1, MISSIONS[mission].title);
         hud_text(24, 62, 0.85f, rgba32(255, 210, 80, 230), buf);
-        float best = 1e9f;
-        for (int g = 0; g < foes.ngroups; g++)
-            if (foes.group_left[g]) best = fminf(best, v3len(v3sub(foes.group_pos[g], pl.pos)));
-        snprintf(buf, sizeof buf, "nearest  %dm", (int)best);
-        hud_text(24, 80, 0.75f, rgba32(255, 255, 255, 170), buf);
-    } else hud_text(24, 62, 0.85f, rgba32(140, 230, 255, 230), "Zone 3 is free. More of Saltreach coming soon.");
+    }
+    char ob[96];
+    hud_text(24, 80, 0.8f, rgba32(255, 255, 255, 210), mission_objective(ob, sizeof ob));
+    vec3 wp;
+    if (mission_waypoint(&wp)) {
+        snprintf(buf, sizeof buf, "%dm", (int)v3len(v3sub(wp, pl.pos)));
+        hud_text(24, 98, 0.75f, rgba32(255, 210, 80, 170), buf);
+    }
+    if (mission_card_t > 0 && mission < NUM_MISSIONS) {
+        float a = clampf(mission_card_t, 0, 1);
+        snprintf(buf, sizeof buf, "MISSION %d", mission + 1);
+        hud_center(120, 1.0f, rgba32(255, 210, 80, (int)(255 * a)), buf);
+        hud_center(142, 2.0f, rgba32(255, 255, 255, (int)(255 * a)), MISSIONS[mission].title);
+        hud_center(192, 0.95f, rgba32(220, 230, 240, (int)(230 * a)), MISSIONS[mission].brief);
+    }
     if (pl.chain >= 2) {
         snprintf(buf, sizeof buf, "x%d", pl.chain);
         hud_text(SCREEN_W - 120, 210, 2.0f, rgba32(140, 230, 255, 240), buf);
@@ -1009,7 +1182,7 @@ void game_render(void) {
         hud_center(SCREEN_H - 150, 1.3f, rgba32(255, 255, 255, 255), "/\\  COUNTER");
     if (banner_t > 0) {
         float a = clampf(banner_t, 0, 1);
-        hud_center(150, 1.8f, rgba32(255, 255, 255, (int)(255 * a)), banner);
+        hud_center(mission_card_t > 0 ? 240 : 150, 1.8f, rgba32(255, 255, 255, (int)(255 * a)), banner);
     }
     const char *sn = state_name();
     if (*sn) hud_center(SCREEN_H - 60, 1, rgba32(150, 230, 255, 220), sn);

@@ -22,5 +22,8 @@ void   plat_poll(Input *in);
 double plat_time(void);         /* seconds */
 /* loads a whole file from the asset folder; caller frees */
 void  *plat_load(const char *name, int *size);
+/* small save file in the user's data folder */
+int    plat_save_write(const void *data, int size);
+int    plat_save_read(void *data, int size);
 
 #endif

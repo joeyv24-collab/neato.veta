@@ -168,7 +168,7 @@ void world_build(World *w, unsigned seed) {
                 add_box(w, v3(px - 2, 0, pz - 2), v3(px + 2, 0.8f, pz + 2), BOX_PROP);
                 b_box(&walls, &flat, v3(px - 2, 0, pz - 2), v3(px + 2, 0.8f, pz + 2), 0xff5a8a5a, 0, 0);
             }
-            w->spawn = v3(cx, 0, cz - 8);
+            w->spawn = v3(cx, 0, cz + 8);     /* north side of the plaza, facing north */
             flush_chunk(w, &walls, &flat, v3(cx, 7, cz), 30);
             continue;
         }

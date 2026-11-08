@@ -16,6 +16,7 @@ static unsigned erng = 4242;
 /* checkpoints sit on road segments / intersections around the district */
 static const float CHECKPOINTS[][2] = {
     {6, -18}, {-66, -114}, {78, -66}, {-114, 30}, {78, 126}, {-18, 78},
+    {126, -114},      /* Vantage field HQ: the final mission */
 };
 
 int enemy_alive(const Enemy *e) { return e->st != E_DOWN && !(e->st == E_KNOCK && e->hp <= 0); }
@@ -34,7 +35,7 @@ static void spawn_guard(Enemies *es, vec3 p, int group, int heavy) {
     e->pos = e->home = p;
     e->group = group;
     e->heavy = heavy;
-    e->hp = heavy ? 6 : 3;
+    e->hp = heavy == 2 ? 30 : heavy ? 6 : 3;
     e->yaw = rng_range(&erng, -3.14f, 3.14f);
     e->st = E_PATROL;
     e->look_t = rng_range(&erng, 0, 3);
@@ -51,11 +52,14 @@ void enemies_init(Enemies *es, World *w, unsigned seed) {
     for (int g = 0; g < es->ngroups; g++) {
         pos[g] = v3(CHECKPOINTS[g][0], 0, CHECKPOINTS[g][1]);
         es->group_pos[g] = pos[g];
-        int count = 3 + g / 2;
+        int hq = g == HQ_GROUP;
+        int count = hq ? 6 : 3 + g / 2;
         for (int k = 0; k < count; k++) {
             float a = k / (float)count * 6.28f + g;
-            spawn_guard(es, v3(pos[g].x + cosf(a) * 3.0f, 0, pos[g].z + sinf(a) * 3.0f), g, g >= 2 && k == 0);
+            int kind = hq ? (k == 0 ? 2 : (k < 3 ? 1 : 0)) : (g >= 2 && k == 0);
+            spawn_guard(es, v3(pos[g].x + cosf(a) * 3.0f, 0, pos[g].z + sinf(a) * 3.0f), g, kind);
         }
+        es->group_active[g] = !hq;
     }
     world_add_checkpoints(w, pos, es->ngroups);
     static const uint8_t white[4] = {255, 255, 255, 255};
@@ -79,13 +83,14 @@ void enemies_reset(Enemies *es) {
         if (!enemy_alive(e)) continue;
         e->pos = e->home; e->vel = v3(0, 0, 0);
         e->st = E_PATROL; e->t = 0;
-        e->hp = e->heavy ? 6 : 3;
+        e->hp = e->heavy == 2 ? 30 : e->heavy ? 6 : 3;
     }
 }
 
 void enemies_alert_group(Enemies *es, int g) {
     if (es->group_alert[g]) return;
     es->group_alert[g] = 1;
+    es->group_spotted[g] = 1;
     for (int i = 0; i < es->n; i++) {
         Enemy *e = &es->e[i];
         if (e->group == g && e->st == E_PATROL) { e->st = E_CHASE; e->t = 0; }
@@ -94,8 +99,24 @@ void enemies_alert_group(Enemies *es, int g) {
 
 int enemies_groups_cleared(const Enemies *es) {
     int n = 0;
-    for (int g = 0; g < es->ngroups; g++) if (es->group_left[g] == 0) n++;
+    for (int g = 0; g < NUM_CHECKPOINTS && g < es->ngroups; g++) if (es->group_left[g] == 0) n++;
     return n;
+}
+
+void enemies_activate(Enemies *es, int g) { es->group_active[g] = 1; }
+
+void enemies_clear_group(Enemies *es, int g) {
+    for (int i = 0; i < es->n; i++) {
+        Enemy *e = &es->e[i];
+        if (e->group != g) continue;
+        e->hp = 0; e->st = E_DOWN; e->t = 0; e->vel = v3(0, 0, 0);
+    }
+    es->group_left[g] = 0;
+}
+
+int enemies_boss(const Enemies *es) {
+    for (int i = 0; i < es->n; i++) if (es->e[i].heavy == 2) return i;
+    return -1;
 }
 
 int enemies_attackers(const Enemies *es) {
@@ -129,7 +150,8 @@ int enemy_hit(Enemies *es, int i, int dmg, vec3 from, float knock, float lift) {
     vec3 away = v3sub(e->pos, from); away.y = 0;
     away = v3len(away) > 0.01f ? v3norm(away) : v3(sinf(e->yaw + 3.14f), 0, cosf(e->yaw + 3.14f));
     e->yaw = atan2f(-away.x, -away.z);      /* face the attacker */
-    if (e->hp <= 0 || knock > 7 || lift > 3) {
+    float knock_limit = e->heavy == 2 ? 12.0f : 7.0f, lift_limit = e->heavy == 2 ? 5.0f : 3.0f;
+    if (e->hp <= 0 || knock > knock_limit || lift > lift_limit) {
         if (lift < 4) lift = 4;
         e->knock = v3scale(away, fmaxf(knock, 5));
         e->knock_y = lift;
@@ -157,6 +179,7 @@ float enemies_update(Enemies *es, const World *w, const PlayerInfo *pi, float dt
     int attackers = enemies_attackers(es);
     for (int i = 0; i < es->n; i++) {
         Enemy *e = &es->e[i];
+        if (!es->group_active[e->group]) continue;
         e->t += dt;
         e->flash = fmaxf(0, e->flash - dt);
         if (e->st == E_DOWN) continue;
@@ -215,7 +238,7 @@ float enemies_update(Enemies *es, const World *w, const PlayerInfo *pi, float dt
             float k = e->t < 0.15f ? 6.0f : 0;
             e->vel.x = f.x * k; e->vel.z = f.z * k;
             if (e->t >= 0.14f && e->t - dt < 0.14f && dist < 2.1f && !pi->invulnerable && fabsf(pi->pos.y - e->pos.y) < 1.5f) {
-                damage += e->heavy ? DAMAGE * 1.5f : DAMAGE;
+                damage += e->heavy == 2 ? DAMAGE * 2.0f : e->heavy ? DAMAGE * 1.5f : DAMAGE;
                 *hit_from = i;
             }
             if (e->t > 0.4f) { e->st = E_RECOVER; e->t = 0; }
@@ -279,7 +302,7 @@ int enemies_target(const Enemies *es, vec3 from, vec3 dir, float range) {
     float dl = v3len(dir);
     for (int i = 0; i < es->n; i++) {
         const Enemy *e = &es->e[i];
-        if (!enemy_alive(e) || e->st == E_KNOCK) continue;
+        if (!enemy_alive(e) || e->st == E_KNOCK || !es->group_active[e->group]) continue;
         vec3 d = v3sub(e->pos, from);
         if (fabsf(d.y) > 3) continue;
         d.y = 0;
@@ -391,8 +414,8 @@ static void guard_pose(const Enemy *e, GPose *p) {
 
 static void build_guard(const Enemy *e) {
     GPose p; guard_pose(e, &p);
-    float sc = e->heavy ? 1.18f : 1.0f;
-    uint32_t armor = e->heavy ? rgba32(70, 60, 58, 255) : rgba32(52, 62, 82, 255);
+    float sc = e->heavy == 2 ? 1.55f : e->heavy ? 1.18f : 1.0f;
+    uint32_t armor = e->heavy == 2 ? rgba32(150, 40, 36, 255) : e->heavy ? rgba32(70, 60, 58, 255) : rgba32(52, 62, 82, 255);
     uint32_t suit = rgba32(38, 40, 46, 255), pad = rgba32(120, 128, 140, 255);
     uint32_t visor = rgba32(255, 150, 40, 255);
     if (e->flash > 0) armor = suit = pad = rgba32(255, 255, 255, 255);
@@ -443,7 +466,7 @@ void enemies_draw(Enemies *es, const mat4 *proj, const mat4 *view, vec3 cam, flo
         use_override = pass == 1;
         for (int i = 0; i < es->n; i++) {
             Enemy *e = &es->e[i];
-            if (v3len(v3sub(e->pos, cam)) > range) continue;
+            if (!es->group_active[e->group] || v3len(v3sub(e->pos, cam)) > range) continue;
             if (pass == 1 && !enemy_alive(e)) continue;
             override_col = enemy_aware(es, i) ? rgba32(255, 70, 50, 120) : rgba32(255, 170, 60, 120);
             build_guard(e);
@@ -464,7 +487,7 @@ void enemies_draw(Enemies *es, const mat4 *proj, const mat4 *view, vec3 cam, flo
         if (e->st != E_WINDUP) continue;
         float pulse = 0.35f + 0.15f * sinf(e->t * 30);
         uint32_t c = e->t > 0.15f ? rgba32(255, 255, 255, 255) : rgba32(255, 160, 40, 255);
-        vec3 p = v3add(e->pos, v3(0, 2.25f * (e->heavy ? 1.18f : 1), 0));
+        vec3 p = v3add(e->pos, v3(0, 2.25f * (e->heavy == 2 ? 1.55f : e->heavy ? 1.18f : 1), 0));
         vec3 r = v3scale(right, pulse), u = v3scale(up, pulse);
         vec3 q[4] = {v3sub(v3sub(p, r), u), v3sub(v3add(p, r), u), v3add(v3add(p, r), u), v3add(v3sub(p, r), u)};
         uint16_t s = (uint16_t)gnv;
