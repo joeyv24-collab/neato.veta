@@ -14,19 +14,19 @@ int main(void) {
     plat_init();
     if (!game_init()) return 1;
     const float dt = 1 / 60.0f;
-    const float shots[] = {1.2f, 2.3f, 3.1f, 4.0f, 5.2f, 6.5f, 8.0f, 10.0f, 12.5f};
+    const float shots[] = {2.5f, 5.6f, 6.1f, 6.6f, 6.9f, 7.4f, 7.9f, 8.4f, 8.8f};
     int shot = 0, nshot = sizeof shots / sizeof shots[0];
     GameDebug last = {0};
     for (int f = 0; f < 60 * 16; f++) {
         float t = f * dt;
         Input in; memset(&in, 0, sizeof in);
-        if (t > 0.8f && t < 1.8f) in.ly = -1;                 /* walk in */
-        if (t > 2.0f) {
-            int k = (int)((t - 2.0f) / 0.2f);                  /* mash strike, counter every 3rd beat */
-            float ph = (t - 2.0f) - k * 0.2f;
+        if (t > 0.8f && t < 4.0f) { in.ly = 1; in.lx = 0.45f; }                  /* walk south to the first checkpoint */
+        if (t > 4.2f) {
+            int k = (int)((t - 4.2f) / 0.2f);                  /* mash strike, counter every 3rd beat */
+            float ph = (t - 4.2f) - k * 0.2f;
             if (ph < 0.05f) in.held = (k % 3 == 2) ? BTN_TRIANGLE : BTN_SQUARE;
         }
-        if (t > 9.0f && t < 9.3f) in.held = BTN_L;           /* scanner */
+        if (t > 11.0f && t < 11.3f) in.held = BTN_L;           /* scanner */
         plat_set_input(&in);
         static Input cur; plat_poll(&cur);
         game_update(&cur, dt);

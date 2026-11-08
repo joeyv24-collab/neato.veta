@@ -54,16 +54,21 @@ static void pose_of(const Animator *a, AnimParams *p) {
         p->fore_l = p->fore_r = 0.25f;
         p->spread_l = p->spread_r = 0.05f;
         p->bob = -0.005f + 0.004f * br;
-        p->hip_side = 0.04f;
+        /* shift weight and glance around now and then */
+        p->hip_side = 0.04f + 0.03f * sinf(t * 0.5f);
+        float look = sinf(t * 0.45f) * sinf(t * 0.23f);
+        p->twist = 0.22f * look;
+        p->thigh_l = 0.04f * sinf(t * 0.5f); p->shin_l = 0.08f + 0.06f * sinf(t * 0.5f);
     } break;
     case ANIM_RUN: {
         p->lean = 0.12f;
         p->thigh_l = 0.55f * s;  p->thigh_r = -0.55f * s;
         p->shin_l = 0.25f + 0.65f * (0.5f - 0.5f * c) * (s < 0 ? 1.4f : 0.6f);
         p->shin_r = 0.25f + 0.65f * (0.5f + 0.5f * c) * (s > 0 ? 1.4f : 0.6f);
-        p->arm_l = -0.5f * s;  p->arm_r = 0.5f * s;
-        p->fore_l = p->fore_r = 1.2f;
-        p->raise_l = p->raise_r = ARM_REST + 0.1f;
+        p->arm_l = -0.55f * s;  p->arm_r = 0.55f * s;
+        p->fore_l = 1.1f + 0.25f * s; p->fore_r = 1.1f - 0.25f * s;
+        p->raise_l = p->raise_r = ARM_REST + 0.18f;
+        p->foot_l = 0.3f * (s > 0 ? s : 0); p->foot_r = 0.3f * (s < 0 ? -s : 0);
         p->twist = 0.12f * s;
         p->bob = 0.04f * fabsf(c) - 0.03f;
     } break;
@@ -159,8 +164,9 @@ static void pose_of(const Animator *a, AnimParams *p) {
         int left = a->cur == ANIM_PUNCH_L;
         float k = t < 0.08f ? t / 0.08f : 1.0f - smooth01((t - 0.12f) / 0.2f);
         k = clampf(k, 0, 1);
-        float tw = (left ? -0.5f : 0.5f) * k;
-        p->twist = tw; p->lean = 0.15f;
+        float tw = (left ? -0.55f : 0.55f) * k;
+        p->twist = tw; p->lean = 0.12f + 0.18f * k;
+        p->bob = -0.06f * k;
         p->thigh_l = 0.35f; p->thigh_r = -0.3f; p->shin_l = 0.35f; p->shin_r = 0.25f;
         p->spread_l = p->spread_r = 0.08f;
         if (left) { p->arm_l = 1.45f * k + 0.2f; p->fore_l = 1.6f * (1 - k) + 0.05f; p->raise_l = ARM_REST + 0.45f;

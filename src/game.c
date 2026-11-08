@@ -47,6 +47,8 @@ typedef struct {
     float respawn_fade;
     int target, hit_done, chain, best_chain, takedowns;
     float chain_t, invuln, hurt_t, scan;
+    float jump_buf, tri_buf, coyote, bank, spin, last_yaw;
+    int finisher;
     Animator anim;
     Pose pose;
 } Player;
@@ -93,6 +95,7 @@ static float mission_card_t, mission_done_t, glide_time;
 typedef struct { char magic[4]; int version, mission, cleared_mask, best_chain, takedowns; float charge; } SaveData;
 static float banner_t; static char banner[64];
 static float dead_t;
+static float hitstop;      /* brief freeze on impact */
 int game_skip_intro = 0;
 
 /* ------------------------------------------------------------------ */
@@ -313,13 +316,24 @@ static void land(void) {
     }
     /* falling builds kinetic charge: Neato absorbs impacts */
     pl.charge = clampf(pl.charge + impact * 0.8f, 0, 100);
-    if (impact > 20) {
+    float hs = sqrtf(pl.vel.x * pl.vel.x + pl.vel.z * pl.vel.z);
+    if (impact > 20 && hs > 5) {
+        /* carry the momentum into a roll instead of stopping dead */
+        fx_shockwave(pl.pos, 0.45f);
+        cam.shake = 0.2f;
+        pl.yaw = atan2f(pl.vel.x, pl.vel.z);
+        set_state(PS_DODGE);
+        anim_play(&pl.anim, ANIM_DODGE, 0.04f);
+    } else if (impact > 20) {
         fx_shockwave(pl.pos, 0.6f);
         cam.shake = 0.35f;
         pl.vel.x *= 0.2f; pl.vel.z *= 0.2f;
         set_state(PS_LAND);
         anim_play(&pl.anim, ANIM_LAND, 0.05f);
-    } else set_state(PS_GROUND);
+    } else {
+        set_state(PS_GROUND);
+        if (pl.jump_buf > 0) pl.jump_buf = 0.12f;     /* buffered jump fires next frame */
+    }
 }
 
 
@@ -383,8 +397,10 @@ static void start_strike(vec3 dir, float mag) {
         }
     } else if (mag > 0) face_towards(dir, 100, 1);
     set_state(PS_ATTACK);
+    pl.finisher = t >= 0 && pl.chain >= 4 && (pl.chain + 1) % 5 == 0;
     static const AnimId seq[4] = {ANIM_PUNCH_L, ANIM_PUNCH_R, ANIM_KICK, ANIM_PUNCH_L};
-    anim_play(&pl.anim, seq[pl.combo & 3], 0.05f);
+    anim_play(&pl.anim, pl.finisher ? ANIM_KICK : seq[pl.combo & 3], 0.05f);
+    if (pl.finisher) pl.spin = 2 * (float)M_PI;
 }
 
 static void attack_update(const Input *in, vec3 dir, float mag, float dt) {
@@ -402,13 +418,16 @@ static void attack_update(const Input *in, vec3 dir, float mag, float dt) {
             fx_spawn(v3add(pl.pos, v3(0, 1.0f, 0)), v3(0, 0, 0), 0.25f, 0.18f, rgba32(140, 230, 255, 200), 1, 0);
         if (pl.st_t >= 0.12f) {
             pl.hit_done = 1;
-            if (dist < 2.0f && enemy_alive(e)) {
-                int kick = pl.combo == 2;
+            if (dist < 2.2f && enemy_alive(e)) {
+                int fin = pl.finisher, kick = pl.combo == 2 || fin;
                 int before = enemies_groups_cleared(&foes);
-                enemy_hit(&foes, pl.target, kick ? 2 : 1, pl.pos, kick ? 9.0f : 3.0f, kick ? 3.5f : 0);
+                if (fin) enemy_hit(&foes, pl.target, 3, pl.pos, 15.0f, 6.0f);
+                else enemy_hit(&foes, pl.target, kick ? 2 : 1, pl.pos, kick ? 9.0f : 3.0f, kick ? 3.5f : 0);
                 chain_add(1);
-                cam.shake = fmaxf(cam.shake, kick ? 0.22f : 0.1f);
-                fx_burst(v3add(e->pos, v3(0, 1.3f, 0)), kick ? 14 : 8, kick ? 7 : 4, rgba32(140, 230, 255, 255));
+                hitstop = fin ? 0.12f : kick ? 0.07f : 0.045f;
+                cam.shake = fmaxf(cam.shake, fin ? 0.4f : kick ? 0.22f : 0.1f);
+                fx_burst(v3add(e->pos, v3(0, 1.3f, 0)), fin ? 26 : kick ? 14 : 8, fin ? 10 : kick ? 7 : 4, rgba32(140, 230, 255, 255));
+                if (fin) { fx_shockwave(e->pos, 0.5f); show_banner("KINETIC FINISHER"); }
                 check_cleared(before);
             }
         }
@@ -448,6 +467,7 @@ static void counter_or_blast(void) {
         pl.invuln = 0.5f;
         set_state(PS_ATTACK); pl.target = -1; pl.hit_done = 1; pl.combo = 0;
         anim_play(&pl.anim, ANIM_COUNTER, 0.04f);
+        hitstop = 0.1f;
         fx_burst(v3add(e->pos, v3(0, 1.4f, 0)), 16, 6, rgba32(255, 255, 255, 255));
         cam.shake = 0.25f;
         check_cleared(before);
@@ -503,6 +523,15 @@ static void player_update(const Input *in, float dt) {
     if (mag > 0) dir = v3scale(dir, 1.0f / v3len(dir));
     int sprint = (in->held & BTN_R) != 0;
     pl.st_t += dt;
+    pl.jump_buf = (in->pressed & BTN_CROSS) ? 0.15f : fmaxf(0, pl.jump_buf - dt);
+    pl.tri_buf = (in->pressed & BTN_TRIANGLE) ? 0.18f : fmaxf(0, pl.tri_buf - dt);
+    pl.coyote = fmaxf(0, pl.coyote - dt);
+    /* a counter pressed a moment early still counts */
+    if (pl.tri_buf > 0 && !(in->pressed & BTN_TRIANGLE) && pl.grounded &&
+        (pl.st == PS_GROUND || pl.st == PS_ATTACK) && enemies_counterable(&foes, pl.pos, 5.0f) >= 0) {
+        pl.tri_buf = 0;
+        counter_or_blast();
+    }
 
     switch (pl.st) {
     case PS_GROUND: case PS_LAND: case PS_ATTACK: {
@@ -520,7 +549,8 @@ static void player_update(const Input *in, float dt) {
         if (mag > 0) face_towards(dir, sprint ? 9.0f : 13.0f, dt);
         if (sprint && mag > 0.5f) pl.charge = clampf(pl.charge + 3.0f * dt, 0, 100);
         if (pl.st != PS_GROUND) break;
-        if (in->pressed & BTN_CROSS) {
+        if (pl.jump_buf > 0) {
+            pl.jump_buf = 0;
             pl.vel.y = JUMP_VEL + (sprint ? 2.0f : 0);
             pl.grounded = 0;
             set_state(PS_AIR);
@@ -540,7 +570,19 @@ static void player_update(const Input *in, float dt) {
         }
         /* walked off a ledge */
         float fl = world_floor(&world, pl.pos.x, pl.pos.z, pl.pos.y + 0.05f, P_RADIUS);
-        if (fl < pl.pos.y - 0.35f) { pl.grounded = 0; set_state(PS_AIR); }
+        if (fl < pl.pos.y - 0.35f) { pl.grounded = 0; set_state(PS_AIR); pl.coyote = 0.13f; }
+        /* running into something waist-high: vault onto it */
+        if (pl.wall_touch == 0 && mag > 0.5f) {
+            vec3 ahead = v3add(pl.pos, v3scale(dir, 0.55f));
+            float top = world_floor(&world, ahead.x, ahead.z, pl.pos.y + 1.4f, 0.1f);
+            if (top > pl.pos.y + 0.5f && top <= pl.pos.y + 1.4f &&
+                world_raycast(&world, v3add(pl.pos, v3(0, 0.3f, 0)), v3add(ahead, v3(0, 0.3f, 0)), NULL, NULL)) {
+                pl.pos = v3(ahead.x, top, ahead.z);
+                set_state(PS_LAND); pl.st_t = 0.14f;
+                anim_play(&pl.anim, ANIM_LEDGE, 0.04f);
+                break;
+            }
+        }
         /* sprinting into a tall wall starts a wall run */
         if (pl.wall_touch && sprint && mag > 0.5f && v3dot(dir, pl.wall_n) < -0.6f) {
             set_state(PS_WALLRUN);
@@ -581,7 +623,36 @@ static void player_update(const Input *in, float dt) {
                 pl.vel.z = approachf(pl.vel.z, t.z, 14 * dt);
                 face_towards(dir, 6, dt);
             }
-            if ((in->pressed & BTN_CROSS) && pl.st_t > 0.12f) set_state(PS_GLIDE);
+            if ((in->pressed & BTN_CROSS) && pl.coyote > 0) {            /* late jump off a ledge */
+                pl.coyote = 0; pl.jump_buf = 0;
+                pl.vel.y = JUMP_VEL + (sprint ? 2.0f : 0);
+                set_state(PS_AIR);
+                anim_play(&pl.anim, ANIM_JUMP, 0.06f);
+            } else if ((in->pressed & BTN_CROSS) && pl.st_t > 0.12f) set_state(PS_GLIDE);
+        }
+        if (in->pressed & BTN_SQUARE) {                 /* dive at a guard below */
+            int t = enemies_target(&foes, pl.pos, mag > 0 ? dir : v3(0, 0, 0), 8.0f);
+            if (t >= 0) {
+                pl.combo = 0; pl.queued = 0;
+                start_strike(dir, mag);
+                if (pl.st == PS_ATTACK) pl.vel.y = fminf(pl.vel.y, -10);
+                break;
+            }
+        }
+        /* grab and vault onto ledges within reach */
+        if (pl.wall_touch && (mag > 0.3f ? v3dot(dir, pl.wall_n) < -0.3f : v3dot(pl.vel, pl.wall_n) < -1.0f)) {
+            vec3 over = v3sub(pl.pos, v3scale(pl.wall_n, 0.7f));
+            float top = world_floor(&world, over.x, over.z, pl.pos.y + 2.3f, 0.1f);
+            if (top > pl.pos.y + 0.25f && top <= pl.pos.y + 2.3f) {
+                pl.pos = v3(over.x, top, over.z);
+                pl.vel = v3scale(pl.wall_n, -2.0f);
+                pl.yaw = atan2f(-pl.wall_n.x, -pl.wall_n.z);
+                pl.grounded = 1;
+                set_state(PS_LAND);
+                pl.st_t = 0.12f;
+                anim_play(&pl.anim, ANIM_LEDGE, 0.04f);
+                break;
+            }
         }
         if (in->pressed & BTN_CIRCLE) {
             set_state(PS_SLAM);
@@ -688,6 +759,14 @@ static void player_update(const Input *in, float dt) {
         pl.body_pitch = lerpf(pl.body_pitch, target_pitch, clampf(14 * dt, 0, 1));
     }
     pl.pivot = lerpf(pl.pivot, pivot, clampf(14 * dt, 0, 1));
+    /* bank into turns, more when fast or gliding */
+    float yaw_rate = dt > 0 ? wrap_angle(pl.yaw - pl.last_yaw) / dt : 0;
+    pl.last_yaw = pl.yaw;
+    float bank_target = 0;
+    if (pl.st == PS_GROUND && hs > 2) bank_target = clampf(-yaw_rate * hs * 0.012f, -0.3f, 0.3f);
+    if (pl.st == PS_GLIDE) bank_target = clampf(-yaw_rate * 0.35f, -0.6f, 0.6f);
+    pl.bank = lerpf(pl.bank, bank_target, clampf(8 * dt, 0, 1));
+    pl.spin = fmaxf(0, pl.spin - dt * 26);
     anim_update(&pl.anim, dt);
 
     /* blinking */
@@ -714,7 +793,8 @@ static void camera_update(const Input *in, float dt) {
     float hs = sqrtf(pl.vel.x * pl.vel.x + pl.vel.z * pl.vel.z);
     if (cam.idle_t > 0.8f && hs > 4 && pl.st != PS_WALLRUN) {
         float d = wrap_angle(pl.yaw - cam.yaw);
-        cam.yaw = wrap_angle(cam.yaw + d * clampf(1.2f * dt, 0, 1));
+        /* don't swing round when she's running towards the camera */
+        if (fabsf(d) < 1.75f) cam.yaw = wrap_angle(cam.yaw + d * clampf(1.2f * dt, 0, 1));
     }
     float want = 4.4f;
     if (pl.st == PS_GLIDE || hs > RUN_SPEED + 2) want = 5.6f;
@@ -956,8 +1036,10 @@ void game_update(const Input *in, float dt) {
     hint_t += dt;
     pl.scan = approachf(pl.scan, (in->held & BTN_L) ? 1.0f : 0.0f, dt * 5);
     camera_update(in, dt);
-    player_update(in, dt);
-    combat_update(dt);
+    float sim = dt;
+    if (hitstop > 0) { hitstop -= dt; sim = dt * 0.08f; }
+    player_update(in, sim);
+    combat_update(sim);
     mission_update(dt);
     fx_update(dt);
 }
@@ -1032,9 +1114,9 @@ static void hud_center(float y, float scale, uint32_t c, const char *t) {
 }
 
 static void draw_hero(const mat4 *proj, const mat4 *view) {
-    mat4 W = m4mul(m4translate(pl.pos), m4roty(pl.yaw));
+    mat4 W = m4mul(m4translate(pl.pos), m4roty(pl.yaw + pl.spin));
     W = m4mul(W, m4translate(v3(0, pl.pivot, 0)));
-    W = m4mul(W, m4rotx(pl.body_pitch + pl.anim.out.body_pitch));
+    W = m4mul(W, m4mul(m4rotz(pl.bank), m4rotx(pl.body_pitch + pl.anim.out.body_pitch)));
     W = m4mul(W, m4translate(v3(0, -pl.pivot + pl.anim.out.bob, 0)));
     anim_apply(&rig, &pl.anim.out, &pl.pose);
     /* light direction into model space */
