@@ -23,7 +23,7 @@ TATTOOS = [
     dict(name='bat (right hip)', image='tattoo_bat.json',
          centre=(-0.083, 1.088, 0.09), out=(-0.6, 0.0, 0.8), width=0.085),
     dict(name='hooded skull (left shoulder)', image='tattoo_skull.png',
-         centre=(0.117, 1.421, -0.024), out=(0.9, 0.4, 0.0), width=0.034),
+         centre=(0.12, 1.398, -0.024), out=(1.0, 0.12, 0.0), width=0.031),
 ]
 
 
@@ -101,9 +101,9 @@ def main(base_png, nmdl, out):
     V, subs, I = load_nmdl(nmdl)
     pos, nrm = surface_maps(V, subs, I, W * SS, H * SS)
 
-    # bare skin = pale, unsaturated texels
+    # bare skin = pale or shaded, unsaturated texels
     r, g, b, a = (tex[..., i] for i in range(4))
-    skin = (r > 165) & (np.abs(r - b) < 30) & (np.abs(r - g) < 30) & (a > 0)
+    skin = (r > 110) & (np.abs(r - b) < 30) & (np.abs(r - g) < 30) & (a > 0)
 
     cover = np.zeros((H * SS, W * SS), np.float32)
     for t in TATTOOS:
