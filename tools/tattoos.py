@@ -22,6 +22,8 @@ INK = np.array([32, 28, 38], np.float32)
 TATTOOS = [
     dict(name='bat (right hip)', image='tattoo_bat.json',
          centre=(-0.083, 1.088, 0.09), out=(-0.6, 0.0, 0.8), width=0.085),
+    dict(name='hooded skull (left shoulder)', image='tattoo_skull.png',
+         centre=(0.12, 1.395, 0.005), out=(0.75, 0.6, 0.3), width=0.055),
 ]
 
 
@@ -70,7 +72,10 @@ def surface_maps(V, subs, I, W, H):
 
 
 def decal_mask(spec, size=1024):
-    """Renders a decal (json polygon outline) to a greyscale coverage image."""
+    """Decal coverage image: a .png mask (white = ink) or a .json polygon outline."""
+    if spec.endswith('.png'):
+        im = Image.open(os.path.join(HERE, '..', 'assets_src', spec)).convert('L')
+        return np.asarray(im, np.float32) / 255.0
     d = json.load(open(os.path.join(HERE, '..', 'assets_src', spec)))
     pts = np.array(d['outline'], float)
     lo, hi = pts.min(0), pts.max(0)
