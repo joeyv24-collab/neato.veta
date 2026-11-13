@@ -1558,7 +1558,6 @@ void game_render(void) {
             hud_text(24, SCREEN_H - 87, 0.85f, c, "hold L aim, R fire smoke bolts");
             hud_text(24, SCREEN_H - 70, 0.85f, c, "Up: mist sense (see guards through walls)");
         }
-        hud_text(24, SCREEN_H - 53, 0.85f, c, "Left/Right: switch between Neato and Kesh");
     }
     if (gstate == GS_PAUSE) {
         hud_center(120, 2.0f, rgba32(255, 255, 255, 255), "PAUSED");
@@ -1568,7 +1567,7 @@ void game_render(void) {
             "R - sprint into a building to run up it.  Hold L to aim, R fires",
             "[] - strike (chains between guards)   O - mist dash / smoke slam",
             "/\\ - counter when a guard flashes, otherwise smoke bomb",
-            "Up - sense    Left/Right - switch to Kesh: charge, throw, four-fist combos",
+            "Up - mist sense    Behind, above or in smoke: silent takedown",
             "",
             "Start / O - resume       Start + Select - quit",
         };
