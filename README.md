@@ -19,6 +19,10 @@ kinetic energy: every fall, sprint and hit charges her up.
 | D-pad Up | Mist sense: see guards through walls |
 | Start | Pause / controls |
 
+**Kesh** (D-pad Left/Right to switch): a four-armed Thal'veri brawler from the trenches off
+Saltreach. X is a big leap (no glide), O is a shoulder charge (in the air: ground pound), □ is a
+four-fist combo and △ counters or grabs the nearest guard and hurls him. Her meter is Fury.
+
 Neato breathed in the smoke when the reactor barge burned and can now become it. Her mist meter
 refills over time and with every hit she lands.
 

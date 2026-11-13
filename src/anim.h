@@ -27,6 +27,7 @@ typedef union {
 typedef struct {
     int bones_ok;
     int spine[7], thigh[2], shin[2], foot[2], upper[2], fore[2], shoulder[2], hand[2];
+    int upper2[2], fore2[2];     /* second (lower) pair of arms, -1 if the model has none */
 } Rig;
 
 typedef struct {

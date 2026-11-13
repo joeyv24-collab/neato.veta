@@ -12,7 +12,7 @@ void anim_rig(Rig *r, const Model *m) {
 #define B(field, fmt) snprintf(buf, sizeof buf, fmt, side[s]); r->field[s] = model_bone(m, buf);
         B(thigh, "DEF-thigh.%s") B(shin, "DEF-shin.%s") B(foot, "DEF-foot.%s")
         B(upper, "DEF-upper_arm.%s") B(fore, "DEF-forearm.%s") B(shoulder, "DEF-shoulder.%s")
-        B(hand, "DEF-hand.%s")
+        B(hand, "DEF-hand.%s") B(upper2, "DEF-upper_arm2.%s") B(fore2, "DEF-forearm2.%s")
 #undef B
     }
     r->bones_ok = r->spine[0] >= 0 && r->thigh[0] >= 0 && r->upper[0] >= 0;

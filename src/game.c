@@ -65,8 +65,12 @@ typedef struct { vec3 p, v; float life, max_life, size, grow; uint32_t col; int 
 #define MAX_PART 384
 
 static World world;
-static Model hero;
-static Rig rig;
+static Model hero, kesh;
+static Rig rig, kesh_rig;
+static int tex_kesh;
+/* playable characters: Neato (smoke) and Kesh (four-armed brawler) */
+enum { CH_NEATO, CH_KESH };
+static int cur_char = CH_NEATO;
 static int tex_hero[SLOT_COUNT], tex_eye[3], tex_font, tex_dot, tex_ring;
 static unsigned char font_w[96];
 static Player pl;
@@ -341,7 +345,7 @@ static void land(void) {
         slam_done = 1;
         cam.shake = 0.6f;
         pl.charge = clampf(pl.charge - 20, 0, 100);
-        enemies_blind(&foes, pl.pos, 4.0f + power * 2, 1.5f);
+        if (cur_char == CH_NEATO) enemies_blind(&foes, pl.pos, 4.0f + power * 2, 1.5f);
         pl.vel.x = pl.vel.z = 0;
         set_state(PS_LAND);
         anim_play(&pl.anim, ANIM_LAND, 0.05f);
@@ -454,14 +458,15 @@ static void attack_update(const Input *in, vec3 dir, float mag, float dt) {
             if (dist < 2.2f && enemy_alive(e)) {
                 int fin = pl.finisher, kick = pl.combo == 2 || fin;
                 int before = enemies_groups_cleared(&foes);
-                if (fin) enemy_hit(&foes, pl.target, 3, pl.pos, 15.0f, 6.0f);
-                else enemy_hit(&foes, pl.target, kick ? 2 : 1, pl.pos, kick ? 9.0f : 3.0f, kick ? 3.5f : 0);
+                int heavy = cur_char == CH_KESH;      /* four fists hit harder */
+                if (fin) enemy_hit(&foes, pl.target, heavy ? 5 : 3, pl.pos, 15.0f, 6.0f);
+                else enemy_hit(&foes, pl.target, (kick ? 2 : 1) + heavy, pl.pos, (kick ? 9.0f : 3.0f) + heavy * 2.5f, kick ? 3.5f : 0);
                 chain_add(1);
                 hitstop = fin ? 0.12f : kick ? 0.07f : 0.045f;
                 cam.shake = fmaxf(cam.shake, fin ? 0.4f : kick ? 0.22f : 0.1f);
                 fx_burst(v3add(e->pos, v3(0, 1.3f, 0)), fin ? 16 : kick ? 10 : 6, fin ? 9 : kick ? 6 : 4, MIST_COL);
                 fx_smoke_burst(v3add(e->pos, v3(0, 1.2f, 0)), fin ? 8 : 3, 3, 0.25f);
-                if (fin) { fx_shockwave(e->pos, 0.5f); show_banner("SMOKE FINISHER"); }
+                if (fin) { fx_shockwave(e->pos, 0.5f); show_banner(cur_char == CH_KESH ? "FOUR-FIST FINISHER" : "SMOKE FINISHER"); }
                 check_cleared(before);
             }
         }
@@ -504,6 +509,23 @@ static void counter_or_blast(void) {
         hitstop = 0.1f;
         fx_burst(v3add(e->pos, v3(0, 1.4f, 0)), 16, 6, rgba32(255, 255, 255, 255));
         cam.shake = 0.25f;
+        check_cleared(before);
+        return;
+    }
+    if (cur_char == CH_KESH) {
+        /* grab the nearest guard with the lower arms and hurl him */
+        if (pl.charge < 15) return;
+        int g = enemies_target(&foes, pl.pos, facing(), 2.8f);
+        set_state(PS_ATTACK); pl.combo = 0; pl.target = -1; pl.hit_done = 1;
+        anim_play(&pl.anim, ANIM_THROW, 0.05f);
+        if (g < 0) return;
+        pl.charge -= 15;
+        face_point(foes.e[g].pos);
+        int before = enemies_groups_cleared(&foes);
+        enemy_hit(&foes, g, 3, v3sub(pl.pos, v3scale(facing(), 0.5f)), 18.0f, 6.5f);
+        chain_add(2);
+        hitstop = 0.09f; cam.shake = 0.3f;
+        fx_burst(v3add(foes.e[g].pos, v3(0, 1.2f, 0)), 14, 7, rgba32(130, 245, 230, 255));
         check_cleared(before);
         return;
     }
@@ -629,7 +651,7 @@ static void player_update(const Input *in, float dt) {
     pl.tri_buf = (in->pressed & BTN_TRIANGLE) ? 0.18f : fmaxf(0, pl.tri_buf - dt);
     pl.coyote = fmaxf(0, pl.coyote - dt);
     /* hold L to aim, R fires smoke bolts */
-    int can_aim = pl.st == PS_GROUND || pl.st == PS_AIR || pl.st == PS_LAND;
+    int can_aim = cur_char == CH_NEATO && (pl.st == PS_GROUND || pl.st == PS_AIR || pl.st == PS_LAND);
     pl.aim = approachf(pl.aim, (in->held & BTN_L) && can_aim ? 1.0f : 0.0f, dt * 8);
     pl.fire_cd = fmaxf(0, pl.fire_cd - dt);
     if (pl.aim > 0.5f) {
@@ -638,6 +660,12 @@ static void player_update(const Input *in, float dt) {
         if ((in->held & BTN_R) && pl.fire_cd <= 0 && pl.charge >= BOLT_COST) fire_bolt();
     } else pl.charge = clampf(pl.charge + 5.0f * dt, 0, 100);      /* mist slowly gathers */
     if (in->pressed & BTN_UP) pl.sense = !pl.sense;
+    if ((in->pressed & (BTN_LEFT | BTN_RIGHT)) && kesh.nverts &&
+        (pl.st == PS_GROUND || pl.st == PS_AIR)) {
+        cur_char = cur_char == CH_NEATO ? CH_KESH : CH_NEATO;
+        fx_smoke_burst(v3add(pl.pos, v3(0, 1.0f, 0)), 18, 3, 0.4f);
+        show_banner(cur_char == CH_KESH ? "KESH" : "NEATO");
+    }
     /* a counter pressed a moment early still counts */
     if (pl.tri_buf > 0 && !(in->pressed & BTN_TRIANGLE) && pl.grounded &&
         (pl.st == PS_GROUND || pl.st == PS_ATTACK) && enemies_counterable(&foes, pl.pos, 5.0f) >= 0) {
@@ -671,17 +699,17 @@ static void player_update(const Input *in, float dt) {
         if (pl.st != PS_GROUND) break;
         if (pl.jump_buf > 0) {
             pl.jump_buf = 0;
-            pl.vel.y = JUMP_VEL + (sprint ? 2.0f : 0);
+            pl.vel.y = (JUMP_VEL + (sprint ? 2.0f : 0)) * (cur_char == CH_KESH ? 1.25f : 1.0f);
             pl.grounded = 0;
             set_state(PS_AIR);
             anim_play(&pl.anim, ANIM_JUMP, 0.08f);
             fx_spawn(pl.pos, v3(0, 0, 0), 0.4f, 0.2f, rgba32(255, 255, 255, 150), 0, 1);
         } else if (in->pressed & BTN_CIRCLE) {
-            /* mist dash: become smoke, pass through guards and blows */
+            /* mist dash (Neato) or shoulder charge (Kesh) */
             vec3 d = mag > 0 ? dir : facing();
             face_towards(d, 100, 1);
             set_state(PS_DODGE);
-            fx_smoke_burst(v3add(pl.pos, v3(0, 1.0f, 0)), 6, 2, 0.35f);
+            if (cur_char == CH_NEATO) fx_smoke_burst(v3add(pl.pos, v3(0, 1.0f, 0)), 6, 2, 0.35f);
         } else if ((in->pressed & BTN_SQUARE) && pl.aim < 0.5f) {
             pl.combo = 0; pl.queued = 0;
             start_strike(dir, mag);
@@ -710,7 +738,30 @@ static void player_update(const Input *in, float dt) {
         }
     } break;
 
-    case PS_DODGE: {      /* mist dash */
+    case PS_DODGE: if (cur_char == CH_KESH) {       /* shoulder charge */
+        vec3 f = facing();
+        float k = pl.st_t < 0.38f ? 1.0f : 0.3f;
+        pl.vel.x = f.x * 17 * k; pl.vel.z = f.z * 17 * k;
+        if (((int)(game_time * 60)) % 3 == 0)
+            fx_spawn(v3add(pl.pos, v3(0, 0.1f, 0)), v3(rng_range(&fx_rng, -1, 1), 0.8f, rng_range(&fx_rng, -1, 1)), 0.5f, 0.3f, rgba32(170, 165, 155, 140), 0, 0);
+        int before = enemies_groups_cleared(&foes);
+        for (int i = 0; i < foes.n; i++) {
+            Enemy *e = &foes.e[i];
+            if (!enemy_alive(e) || e->st == E_KNOCK || !foes.group_active[e->group]) continue;
+            vec3 d = v3sub(e->pos, pl.pos);
+            if (fabsf(d.y) > 1.5f) continue;
+            d.y = 0;
+            if (v3len(d) < 1.4f && v3dot(d, f) > 0) {
+                enemy_hit(&foes, i, 2, pl.pos, 14.0f, 3.5f);
+                chain_add(1);
+                hitstop = 0.06f; cam.shake = 0.25f;
+                fx_burst(v3add(e->pos, v3(0, 1.2f, 0)), 10, 6, rgba32(130, 245, 230, 255));
+            }
+        }
+        check_cleared(before);
+        if (pl.st_t > 0.5f) set_state(pl.grounded ? PS_GROUND : PS_AIR);
+        break;
+    } else {      /* mist dash */
         vec3 f = facing();
         float k = pl.st_t < 0.22f ? 1.0f : 0.35f;
         pl.vel.x = f.x * 24 * k; pl.vel.z = f.z * 24 * k;
@@ -763,7 +814,7 @@ static void player_update(const Input *in, float dt) {
                 pl.vel.y = JUMP_VEL + (sprint ? 2.0f : 0);
                 set_state(PS_AIR);
                 anim_play(&pl.anim, ANIM_JUMP, 0.06f);
-            } else if ((in->pressed & BTN_CROSS) && pl.st_t > 0.12f) set_state(PS_GLIDE);
+            } else if ((in->pressed & BTN_CROSS) && pl.st_t > 0.12f && cur_char == CH_NEATO) set_state(PS_GLIDE);
         }
         if (in->pressed & BTN_SQUARE) {                 /* dive at a guard below */
             int t = enemies_target(&foes, pl.pos, mag > 0 ? dir : v3(0, 0, 0), 8.0f);
@@ -983,6 +1034,10 @@ int game_init(void) {
     tex_hero[SLOT_BROWS] = load_ntex("eyebrows0.ntex", 1);
     tex_hero[SLOT_MOUTH] = load_ntex("mouth0.ntex", 1);
     tex_hero[SLOT_PUPIL] = load_ntex("pupil0.ntex", 1);
+    if (model_load(&kesh, "kesh.nmdl")) {
+        anim_rig(&kesh_rig, &kesh);
+        tex_kesh = load_ntex("kesh.ntex", 0);       /* palette texture: no filtering */
+    }
     tex_font = load_ntex("font.ntex", 1);
     {
         int sz; unsigned char *fw = plat_load("font.w", &sz);
@@ -1024,7 +1079,7 @@ static void combat_update(float dt) {
     PlayerInfo pi;
     pi.pos = pl.pos;
     pl.invuln = fmaxf(0, pl.invuln - dt);
-    pi.invulnerable = pl.invuln > 0 || pl.st == PS_DODGE || pl.st == PS_GLIDE || (pl.st == PS_ROLL && pl.st_t < 0.38f) || pl.st == PS_LEDGE ||
+    pi.invulnerable = pl.invuln > 0 || (pl.st == PS_DODGE && cur_char == CH_NEATO) || pl.st == PS_GLIDE || (pl.st == PS_ROLL && pl.st_t < 0.38f) || pl.st == PS_LEDGE ||
                       pl.st == PS_SLAM || pl.st == PS_WALLRUN;
     pi.hidden = pl.pos.y > 3.0f;
     for (int c = 0; c < 4; c++) if (clouds[c].t > 0 && v3len(v3sub(clouds[c].p, pl.pos)) < 5.5f) pi.hidden = 1;
@@ -1271,20 +1326,55 @@ static void hud_center(float y, float scale, uint32_t c, const char *t) {
     hud_text(SCREEN_W / 2 - w / 2, y, scale, c, t);
 }
 
+/* Kesh's lower (grappling) arms: guard in front of her stomach, swing when
+ * running, jab during strikes, both reach out for a throw or charge */
+static void pose_lower_arms(const Rig *rg) {
+    if (rg->upper2[0] < 0) return;
+    float s = sinf(pl.anim.phase), hs = sqrtf(pl.vel.x * pl.vel.x + pl.vel.z * pl.vel.z);
+    float arm[2] = {0.55f, 0.55f}, fore[2] = {1.35f, 1.35f}, raise[2] = {-0.15f, -0.15f};
+    if (pl.st == PS_GROUND && hs > 1) {
+        float amp = clampf(hs / 10.0f, 0, 1);
+        arm[0] = 0.35f + 0.6f * s * amp; arm[1] = 0.35f - 0.6f * s * amp;
+    } else if (pl.st == PS_ATTACK) {
+        AnimId a = pl.anim.cur;
+        float k = pl.st_t < 0.08f ? pl.st_t / 0.08f : 1.0f - smooth01((pl.st_t - 0.12f) / 0.2f);
+        k = clampf(k, 0, 1);
+        if (a == ANIM_THROW || a == ANIM_COUNTER) { arm[0] = arm[1] = 1.5f * k + 0.4f; fore[0] = fore[1] = 0.4f; raise[0] = raise[1] = 0.1f; }
+        else {
+            int side = (pl.combo & 1);              /* jab with the lower fist opposite the upper strike */
+            arm[side] = 0.4f + 1.25f * k; fore[side] = 1.4f * (1 - k) + 0.1f;
+        }
+    } else if (pl.st == PS_DODGE) {               /* shoulder charge: lower arms braced forward */
+        arm[0] = arm[1] = 1.2f; fore[0] = fore[1] = 1.6f; raise[0] = raise[1] = 0.0f;
+    } else if (pl.st == PS_AIR || pl.st == PS_SLAM) {
+        arm[0] = arm[1] = 0.2f; raise[0] = raise[1] = 0.5f; fore[0] = fore[1] = 0.6f;
+    }
+    const float sg[2] = {1, -1};
+    for (int i = 0; i < 2; i++) {
+        pose_rotate(&pl.pose, rg->upper2[i], m4mul(m4rotx(-arm[i]), m4rotz(raise[i] * sg[i])));
+        pose_rotate(&pl.pose, rg->fore2[i], m4rotx(-fore[i]));
+    }
+}
+
 static void draw_hero(const mat4 *proj, const mat4 *view) {
     mat4 W = m4mul(m4translate(pl.pos), m4roty(pl.yaw + pl.spin));
     W = m4mul(W, m4translate(v3(0, pl.pivot, 0)));
     W = m4mul(W, m4mul(m4rotz(pl.bank), m4rotx(pl.body_pitch + pl.anim.out.body_pitch)));
     W = m4mul(W, m4translate(v3(0, -pl.pivot + pl.anim.out.bob, 0)));
-    anim_apply(&rig, &pl.anim.out, &pl.pose);
+    Model *mdl = cur_char == CH_KESH && kesh.nverts ? &kesh : &hero;
+    Rig *rg = mdl == &kesh ? &kesh_rig : &rig;
+    anim_apply(rg, &pl.anim.out, &pl.pose);
+    if (mdl == &kesh) pose_lower_arms(rg);
     /* light direction into model space */
     vec3 L = v3norm(v3(0.45f, 0.8f, 0.4f));
     mat4 Rinv = m4rot_inverse(W);
-    model_skin(&hero, &pl.pose, m4dir(Rinv, L), 0.62f, 0xffffffff);
+    model_skin(mdl, &pl.pose, m4dir(Rinv, L), 0.62f, 0xffffffff);
     mat4 MV = m4mul(*view, W);
     gfx_set_matrices(proj, &MV);
     tex_hero[SLOT_EYE] = pl.blink > 0 ? tex_eye[2] : (pl.blink > -0.05f ? tex_eye[1] : tex_eye[0]);
-    for (int s = 0; s < hero.nsub; s++)
+    if (mdl == &kesh)
+        gfx_draw(kesh.skinned, kesh.nverts, kesh.idx, kesh.nidx, tex_kesh, 0);
+    else for (int s = 0; s < hero.nsub; s++)
         gfx_draw(hero.skinned, hero.nverts, hero.idx + hero.sub[s].first, hero.sub[s].count,
                  tex_hero[hero.sub[s].slot], GFX_ALPHA_TEST | GFX_NO_CULL);
 
@@ -1331,7 +1421,8 @@ void game_render(void) {
     world_draw(&world, &proj, &view, cam.pos, cam.fwd, FOG_END);
     enemies_draw(&foes, &proj, &view, cam.pos, FOG_END, pl.scan > 0.5f);
     draw_beacons(&proj, &view);
-    int as_smoke = (pl.st == PS_DODGE && pl.st_t > 0.03f && pl.st_t < 0.27f) || (pl.st == PS_GLIDE && pl.st_t > 0.06f);
+    int as_smoke = cur_char == CH_NEATO &&
+                   ((pl.st == PS_DODGE && pl.st_t > 0.03f && pl.st_t < 0.27f) || (pl.st == PS_GLIDE && pl.st_t > 0.06f));
     if (game_show_player && !as_smoke) draw_hero(&proj, &view);
     {   /* smoke bolt heads */
         GVert bv[64]; uint16_t bi[96]; int nb = 0;
@@ -1415,8 +1506,8 @@ void game_render(void) {
         gfx_end_frame();
         return;
     }
-    hud_text(252, 18, 1, rgba32(255, 255, 255, 230), "NEATO");
-    hud_text(252, 36, 0.8f, rgba32(196, 186, 236, 230), "MIST");
+    hud_text(252, 18, 1, rgba32(255, 255, 255, 230), cur_char == CH_KESH ? "KESH" : "NEATO");
+    hud_text(252, 36, 0.8f, rgba32(196, 186, 236, 230), cur_char == CH_KESH ? "FURY" : "MIST");
     /* objective */
     if (mission < NUM_MISSIONS) {
         snprintf(buf, sizeof buf, "%d. %s", mission + 1, MISSIONS[mission].title);
@@ -1452,12 +1543,22 @@ void game_render(void) {
     if (pl.scan > 0.5f && gstate == GS_PLAY) hud_center(SCREEN_H - 84, 0.9f, rgba32(196, 186, 236, 220), "MIST SENSE");
     if (hint_t < 14 && gstate == GS_PLAY) {
         uint32_t c = rgba32(255, 255, 255, (int)(230 * clampf(14 - hint_t, 0, 1)));
-        hud_text(24, SCREEN_H - 155, 0.85f, c, "X jump / hold in air: mist glide");
-        hud_text(24, SCREEN_H - 138, 0.85f, c, "R sprint - into a wall: wall run");
-        hud_text(24, SCREEN_H - 121, 0.85f, c, "O mist dash / in air: smoke slam");
-        hud_text(24, SCREEN_H - 104, 0.85f, c, "[] strike   /\\ counter or smoke bomb");
-        hud_text(24, SCREEN_H - 87, 0.85f, c, "hold L aim, R fire smoke bolts");
-        hud_text(24, SCREEN_H - 70, 0.85f, c, "Up: mist sense (see guards through walls)");
+        if (cur_char == CH_KESH) {
+            hud_text(24, SCREEN_H - 155, 0.85f, c, "KESH - X: big leap (no glide)");
+            hud_text(24, SCREEN_H - 138, 0.85f, c, "R sprint - into a wall: wall run");
+            hud_text(24, SCREEN_H - 121, 0.85f, c, "O shoulder charge / in air: ground pound");
+            hud_text(24, SCREEN_H - 104, 0.85f, c, "[] four-fist combo   /\\ counter or grab & throw");
+            hud_text(24, SCREEN_H - 87, 0.85f, c, "Fury fills as you land hits");
+            hud_text(24, SCREEN_H - 70, 0.85f, c, "Up: sense (see guards through walls)");
+        } else {
+            hud_text(24, SCREEN_H - 155, 0.85f, c, "X jump / hold in air: mist glide");
+            hud_text(24, SCREEN_H - 138, 0.85f, c, "R sprint - into a wall: wall run");
+            hud_text(24, SCREEN_H - 121, 0.85f, c, "O mist dash / in air: smoke slam");
+            hud_text(24, SCREEN_H - 104, 0.85f, c, "[] strike   /\\ counter or smoke bomb");
+            hud_text(24, SCREEN_H - 87, 0.85f, c, "hold L aim, R fire smoke bolts");
+            hud_text(24, SCREEN_H - 70, 0.85f, c, "Up: mist sense (see guards through walls)");
+        }
+        hud_text(24, SCREEN_H - 53, 0.85f, c, "Left/Right: switch between Neato and Kesh");
     }
     if (gstate == GS_PAUSE) {
         hud_center(120, 2.0f, rgba32(255, 255, 255, 255), "PAUSED");
@@ -1467,7 +1568,7 @@ void game_render(void) {
             "R - sprint into a building to run up it.  Hold L to aim, R fires",
             "[] - strike (chains between guards)   O - mist dash / smoke slam",
             "/\\ - counter when a guard flashes, otherwise smoke bomb",
-            "Up - mist sense    Behind, above or in smoke: silent takedown",
+            "Up - sense    Left/Right - switch to Kesh: charge, throw, four-fist combos",
             "",
             "Start / O - resume       Start + Select - quit",
         };
