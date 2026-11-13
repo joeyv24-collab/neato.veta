@@ -738,12 +738,16 @@ static void player_update(const Input *in, float dt) {
             pl.vel.x = approachf(pl.vel.x, f.x * GLIDE_SPEED, 20 * dt);
             pl.vel.z = approachf(pl.vel.z, f.z * GLIDE_SPEED, 20 * dt);
             pl.vel.y = fmaxf(pl.vel.y - GRAVITY * dt, -GLIDE_SINK);
-            if (((int)(game_time * 30)) % 2 == 0) {        /* mist streaming off her arms */
-                vec3 h = v3add(pl.pos, v3(0, 1.0f, 0));
-                vec3 side = v3scale(v3(-f.z, 0, f.x), 0.9f);
-                fx_smoke(v3add(h, side), v3(0, 0.2f, 0), 0.6f, 0.14f);
-                fx_smoke(v3sub(h, side), v3(0, 0.2f, 0), 0.6f, 0.14f);
+            /* her whole body is smoke: a dense cloud stretched along her flight
+             * path, with a streaming tail */
+            for (int k = 0; k < 4; k++) {
+                float along = rng_range(&fx_rng, -0.9f, 0.6f);
+                vec3 c = v3add(pl.pos, v3add(v3(0, 0.95f, 0), v3scale(f, along)));
+                c = v3add(c, v3(rng_range(&fx_rng, -0.25f, 0.25f), rng_range(&fx_rng, -0.2f, 0.25f), rng_range(&fx_rng, -0.25f, 0.25f)));
+                fx_smoke(c, v3add(v3scale(pl.vel, 0.55f), v3(0, 0.3f, 0)), rng_range(&fx_rng, 0.35f, 0.6f), rng_range(&fx_rng, 0.2f, 0.32f));
             }
+            if (((int)(game_time * 60)) % 2 == 0)       /* faint glow at the heart of the cloud */
+                fx_spawn(v3add(pl.pos, v3(0, 0.95f, 0)), v3scale(pl.vel, 0.8f), 0.12f, 0.35f, rgba32(196, 186, 236, 90), 1, 0);
         } else {
             pl.vel.y -= GRAVITY * dt;
             float hs = sqrtf(pl.vel.x * pl.vel.x + pl.vel.z * pl.vel.z);
@@ -827,6 +831,16 @@ static void player_update(const Input *in, float dt) {
         pl.vel = v3(0, -SLAM_VEL, 0);
         if (pl.st_t < 0.12f) pl.vel.y = 4;   /* brief hang before the plunge */
         break;
+    }
+
+    /* dissolving into smoke and reforming around the mist glide */
+    {
+        static PState prev_st = PS_GROUND;
+        if (pl.st == PS_GLIDE && prev_st != PS_GLIDE)
+            fx_smoke_burst(v3add(pl.pos, v3(0, 0.95f, 0)), 14, 3, 0.35f);
+        else if (pl.st != PS_GLIDE && prev_st == PS_GLIDE)
+            fx_smoke_burst(v3add(pl.pos, v3(0, 0.95f, 0)), 12, 2.5f, 0.3f);
+        prev_st = pl.st;
     }
 
     /* ---- integrate and collide ---- */
@@ -1010,7 +1024,7 @@ static void combat_update(float dt) {
     PlayerInfo pi;
     pi.pos = pl.pos;
     pl.invuln = fmaxf(0, pl.invuln - dt);
-    pi.invulnerable = pl.invuln > 0 || pl.st == PS_DODGE || (pl.st == PS_ROLL && pl.st_t < 0.38f) || pl.st == PS_LEDGE ||
+    pi.invulnerable = pl.invuln > 0 || pl.st == PS_DODGE || pl.st == PS_GLIDE || (pl.st == PS_ROLL && pl.st_t < 0.38f) || pl.st == PS_LEDGE ||
                       pl.st == PS_SLAM || pl.st == PS_WALLRUN;
     pi.hidden = pl.pos.y > 3.0f;
     for (int c = 0; c < 4; c++) if (clouds[c].t > 0 && v3len(v3sub(clouds[c].p, pl.pos)) < 5.5f) pi.hidden = 1;
@@ -1317,7 +1331,8 @@ void game_render(void) {
     world_draw(&world, &proj, &view, cam.pos, cam.fwd, FOG_END);
     enemies_draw(&foes, &proj, &view, cam.pos, FOG_END, pl.scan > 0.5f);
     draw_beacons(&proj, &view);
-    if (game_show_player && !(pl.st == PS_DODGE && pl.st_t > 0.03f && pl.st_t < 0.27f)) draw_hero(&proj, &view);
+    int as_smoke = (pl.st == PS_DODGE && pl.st_t > 0.03f && pl.st_t < 0.27f) || (pl.st == PS_GLIDE && pl.st_t > 0.06f);
+    if (game_show_player && !as_smoke) draw_hero(&proj, &view);
     {   /* smoke bolt heads */
         GVert bv[64]; uint16_t bi[96]; int nb = 0;
         vec3 right = v3(view.m[0], view.m[4], view.m[8]), up = v3(view.m[1], view.m[5], view.m[9]);
