@@ -17,6 +17,12 @@ set(VITA_VERSION  "00.01")
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -O2 -std=gnu99 -ffast-math -mfpu=neon -mcpu=cortex-a9 -Wall -Wno-misleading-indentation")
 
+# vita-elf-create needs a few KB of free address space after the code
+# segment; if the code happens to end right before the data segment the
+# build fails, so CI retries with some padding (see build.yml).
+set(NEATO_PAD 0 CACHE STRING "bytes of read-only padding after the code")
+add_definitions(-DNEATO_PAD=${NEATO_PAD})
+
 add_executable(neato
   src/main_vita.c
   src/platform_vita.c

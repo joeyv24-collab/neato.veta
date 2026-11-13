@@ -5,6 +5,10 @@
 
 void game_fps_tick(float dt);
 
+#if NEATO_PAD > 0
+__attribute__((used)) static const char segment_pad[NEATO_PAD] = {1};
+#endif
+
 int main(void) {
     plat_init();
     gfx_init();
