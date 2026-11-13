@@ -15,7 +15,7 @@ set(VITA_APP_NAME "Neato Saltreach")
 set(VITA_TITLEID  "NEAT00001")
 set(VITA_VERSION  "00.01")
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -std=gnu99 -ffast-math -mfpu=neon -mcpu=cortex-a9 -Wall -Wno-misleading-indentation")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -O2 -std=gnu99 -ffast-math -mfpu=neon -mcpu=cortex-a9 -Wall -Wno-misleading-indentation")
 
 add_executable(neato
   src/main_vita.c
